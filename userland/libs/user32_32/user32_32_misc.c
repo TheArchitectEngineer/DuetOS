@@ -851,8 +851,7 @@ static HANDLE user32_load_accelerators(HINSTANCE inst, unsigned int name_id)
     name.id = name_id;
     name.name = (const unsigned short*)0;
     name.name_len = 0;
-    if (!duet_res_find(&view, &type, &name, 0u, 0, &rva, &size) || size == 0u ||
-        (size % USER32_ACCEL_ENTRY_SIZE) != 0u)
+    if (!duet_res_find(&view, &type, &name, 0u, 0, &rva, &size) || size == 0u || (size % USER32_ACCEL_ENTRY_SIZE) != 0u)
         return (HANDLE)0;
     count = size / USER32_ACCEL_ENTRY_SIZE;
     if (count > USER32_ACCEL_ENTRIES)
