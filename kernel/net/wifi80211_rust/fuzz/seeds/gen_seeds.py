@@ -23,6 +23,7 @@
 #        per-target corpus layout.
 
 import os
+import struct
 import sys
 
 
@@ -100,11 +101,13 @@ def main() -> None:
     write(root, "fuzz_beacon_body", "minimal_no_ie.bin", bytes(36))
     write(root, "fuzz_beacon_body", "too_short.bin", bytes(30))
 
-    # --- fuzz_ie --- (first 4 bytes = little-endian u32 offset, rest = buffer)
-    ssid_off = (36).to_bytes(4, "little")
+    # --- fuzz_ie --- (first native-pointer-width bytes = LE usize offset)
+    usize_bytes = struct.calcsize("P")
+    ssid_off = (36).to_bytes(usize_bytes, "little")
     write(root, "fuzz_ie", "ssid_ie.bin", ssid_off + beacon)
-    truncated_off = (0).to_bytes(4, "little")
+    truncated_off = (0).to_bytes(usize_bytes, "little")
     write(root, "fuzz_ie", "truncated_ie.bin", truncated_off + bytes([0, 10, 1, 2, 3]))
+    write(root, "fuzz_ie", "max_offset.bin", ((1 << (usize_bytes * 8)) - 1).to_bytes(usize_bytes, "little") + b"\0")
 
     # --- fuzz_country_ie --- (payload only, no element-id/length header)
     write(root, "fuzz_country_ie", "minimal.bin", b"USI")

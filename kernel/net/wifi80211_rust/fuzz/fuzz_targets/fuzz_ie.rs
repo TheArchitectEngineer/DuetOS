@@ -8,14 +8,17 @@ use libfuzzer_sys::fuzz_target;
 
 fuzz_target!(|data: &[u8]| {
     // The FFI call takes both a buffer and a start offset into it. The
-    // first 4 bytes of the fuzz input select `off` (as a `u32`, so the
-    // split stays host-pointer-width independent); the remainder is the
-    // buffer `parse_ie` walks. Inputs shorter than 4 bytes fall back to
+    // first native-pointer-width bytes select `off`; the remainder is the
+    // buffer `parse_ie` walks. Inputs shorter than that width fall back to
     // offset 0 over the whole input, so they're still exercised rather
     // than skipped.
-    let (off, buf): (usize, &[u8]) = if data.len() >= 4 {
-        let off = u32::from_le_bytes([data[0], data[1], data[2], data[3]]) as usize;
-        (off, &data[4..])
+    let width = core::mem::size_of::<usize>();
+    let (off, buf): (usize, &[u8]) = if data.len() >= width {
+        let mut off = 0usize;
+        for (shift, byte) in data[..width].iter().enumerate() {
+            off |= (*byte as usize) << (shift * 8);
+        }
+        (off, &data[width..])
     } else {
         (0, data)
     };

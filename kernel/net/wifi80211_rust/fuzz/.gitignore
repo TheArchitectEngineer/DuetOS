@@ -1,8 +1,12 @@
 target/
-corpus/
+# Deterministic, synthetic seed inputs are source artifacts.  Override the
+# repository-wide binary and Cargo.lock ignores for this detached fuzz crate.
+!Cargo.lock
+!corpus/
+!corpus/**/
+!corpus/**/*.bin
 artifacts/
 crash-*
 leak-*
 timeout-*
 oom-*
-Cargo.lock

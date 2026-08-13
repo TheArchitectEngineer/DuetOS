@@ -19,7 +19,7 @@ driver.
 |--------|------------------|--------|
 | `fuzz_frame_header` | `duetos_wifi80211_parse_frame_header` | 24-byte MAC header (frame control, addresses, sequence control); rejects extension frames |
 | `fuzz_beacon_body` | `duetos_wifi80211_parse_beacon_body` | Beacon / Probe Response fixed 12-byte prefix (timestamp, interval, capability info) |
-| `fuzz_ie` | `duetos_wifi80211_parse_ie` | One Information-Element tag/length/payload step of the IE-list walker (first 4 input bytes select the start offset; see the target's source comment) |
+| `fuzz_ie` | `duetos_wifi80211_parse_ie` | One Information-Element tag/length/payload step of the IE-list walker (first native-pointer-width input bytes select the start offset; see the target's source comment) |
 | `fuzz_country_ie` | `duetos_wifi80211_parse_country_ie` | 802.11d Country IE payload: alpha2 + environment + up to 16 sub-band triplets |
 | `fuzz_eapol_key` | `duetos_wifi80211_parse_eapol_key` | IEEE 802.1X-2010 EAPOL-Key descriptor (4-way handshake message) |
 
@@ -34,7 +34,7 @@ Rust-backed harness in `tests/fuzz/`.
 cargo install cargo-fuzz --locked
 
 cd kernel/net/wifi80211_rust/fuzz
-python3 seeds/gen_seeds.py                 # populates corpus/<target>/ (gitignored)
+python3 seeds/gen_seeds.py                 # regenerates checked-in synthetic corpus/<target>/ seeds
 
 cargo fuzz run fuzz_frame_header -- -max_total_time=60
 cargo fuzz run fuzz_beacon_body  -- -max_total_time=60
