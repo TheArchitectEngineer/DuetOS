@@ -403,6 +403,7 @@ __declspec(dllexport) HWND __stdcall CreateWindowExW(DWORD ex, const wchar_t16* 
 
 __declspec(dllexport) BOOL __stdcall DestroyWindow(HWND h)
 {
+    user32_dialog_on_destroy(h);
     user32_record_destroy(h);
     return duet_syscall1(SYS_WIN_DESTROY, (unsigned)(unsigned long)h) ? 1 : 0;
 }

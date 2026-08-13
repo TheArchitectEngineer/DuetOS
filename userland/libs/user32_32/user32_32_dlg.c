@@ -209,8 +209,7 @@ __declspec(dllexport) UINT __stdcall GetDlgItemInt(HWND dlg, int id, BOOL* trans
 // Win32 failure contract for DialogBoxParam and lets a caller take its
 // error path instead of waiting forever on a modal loop that never
 // runs.
-__declspec(dllexport) INT __stdcall DialogBoxParamA(HINSTANCE inst, const char* tmpl, HWND owner, void* proc,
-                                                    LPARAM param)
+static INT __stdcall dlg32_stub_DialogBoxParamA(HINSTANCE inst, const char* tmpl, HWND owner, void* proc, LPARAM param)
 {
     (void)inst;
     (void)tmpl;
@@ -220,8 +219,8 @@ __declspec(dllexport) INT __stdcall DialogBoxParamA(HINSTANCE inst, const char* 
     return -1;
 }
 
-__declspec(dllexport) INT __stdcall DialogBoxParamW(HINSTANCE inst, const wchar_t16* tmpl, HWND owner, void* proc,
-                                                    LPARAM param)
+static INT __stdcall dlg32_stub_DialogBoxParamW(HINSTANCE inst, const wchar_t16* tmpl, HWND owner, void* proc,
+                                                LPARAM param)
 {
     (void)inst;
     (void)tmpl;
@@ -232,8 +231,8 @@ __declspec(dllexport) INT __stdcall DialogBoxParamW(HINSTANCE inst, const wchar_
 }
 
 // STUB: same missing template decoder. NULL is the Win32 failure return.
-__declspec(dllexport) HWND __stdcall CreateDialogParamA(HINSTANCE inst, const char* tmpl, HWND owner, void* proc,
-                                                        LPARAM param)
+static HWND __stdcall dlg32_stub_CreateDialogParamA(HINSTANCE inst, const char* tmpl, HWND owner, void* proc,
+                                                    LPARAM param)
 {
     (void)inst;
     (void)tmpl;
@@ -243,8 +242,8 @@ __declspec(dllexport) HWND __stdcall CreateDialogParamA(HINSTANCE inst, const ch
     return (HWND)0;
 }
 
-__declspec(dllexport) HWND __stdcall CreateDialogParamW(HINSTANCE inst, const wchar_t16* tmpl, HWND owner, void* proc,
-                                                        LPARAM param)
+static HWND __stdcall dlg32_stub_CreateDialogParamW(HINSTANCE inst, const wchar_t16* tmpl, HWND owner, void* proc,
+                                                    LPARAM param)
 {
     (void)inst;
     (void)tmpl;
@@ -258,13 +257,381 @@ __declspec(dllexport) HWND __stdcall CreateDialogParamW(HINSTANCE inst, const wc
 // started one. A caller reaching EndDialog is on a path its own
 // DialogBoxParam failure return should already have diverted; the
 // window is destroyed so a hand-built dialog still tears down.
-__declspec(dllexport) BOOL __stdcall EndDialog(HWND dlg, INT result)
+static BOOL __stdcall dlg32_stub_EndDialog(HWND dlg, INT result)
 {
     (void)result;
     user32_record_destroy(dlg);
     return duet_syscall1(SYS_WIN_DESTROY, (unsigned)(unsigned long)dlg) ? 1 : 0;
 }
 
+/* Resource-template implementation intentionally accepts only resource IDs.
+ * The indirect APIs have no byte length, so treating a caller pointer as a
+ * bounded template would not meet the malformed-input contract. */
+#include "../common/pe_resources.h"
+LRESULT __stdcall DefWindowProcA(HWND, UINT, WPARAM, LPARAM);
+HWND __stdcall CreateWindowExA(DWORD, const char*, const char*, DWORD, int, int, int, int, HWND, HMENU, HINSTANCE,
+                               void*);
+BOOL __stdcall DestroyWindow(HWND);
+BOOL __stdcall ShowWindow(HWND, INT);
+BOOL __stdcall GetMessageA(struct user32_msg32*, HWND, UINT, UINT);
+LRESULT __stdcall DispatchMessageA(const struct user32_msg32*);
+typedef INT(__stdcall* DLGPROC32)(HWND, UINT, WPARAM, LPARAM);
+#define DLG32_MAX_ITEMS 64u
+#define DLG32_WS_CHILD 0x40000000u
+#define DLG32_WS_VISIBLE 0x10000000u
+#define DLG32_WS_POPUP 0x80000000u
+#define DLG32_DS_SETFONT 0x40u
+#define DLG32_DS_CENTER 0x0800u
+#define DLG32_WM_INITDIALOG 0x0110u
+#define DLG32_WM_CLOSE 0x0010u
+typedef struct
+{
+    const unsigned char* p;
+    unsigned size, off;
+    int ok;
+} DLG32_CURSOR;
+typedef struct
+{
+    HWND hwnd;
+    INT result;
+    int modal, ended, used;
+} DLG32_STATE;
+static DLG32_STATE s_dlg32_states[4];
+static int dlg32_need(DLG32_CURSOR* c, unsigned n)
+{
+    if (!c->ok || c->off > c->size || n > c->size - c->off)
+    {
+        c->ok = 0;
+        return 0;
+    }
+    return 1;
+}
+static unsigned short dlg32_u16(DLG32_CURSOR* c)
+{
+    unsigned short x;
+    if (!dlg32_need(c, 2))
+        return 0;
+    x = (unsigned short)(c->p[c->off] | ((unsigned short)c->p[c->off + 1] << 8));
+    c->off += 2;
+    return x;
+}
+static unsigned dlg32_u32(DLG32_CURSOR* c)
+{
+    unsigned x;
+    if (!dlg32_need(c, 4))
+        return 0;
+    x = (unsigned)c->p[c->off] | ((unsigned)c->p[c->off + 1] << 8) | ((unsigned)c->p[c->off + 2] << 16) |
+        ((unsigned)c->p[c->off + 3] << 24);
+    c->off += 4;
+    return x;
+}
+static void dlg32_align(DLG32_CURSOR* c)
+{
+    unsigned x = (c->off + 3u) & ~3u;
+    if (!c->ok || x < c->off || x > c->size)
+        c->ok = 0;
+    else
+        c->off = x;
+}
+static void dlg32_skip(DLG32_CURSOR* c)
+{
+    unsigned short x = dlg32_u16(c);
+    if (!c->ok || !x)
+        return;
+    if (x == 0xffffu)
+    {
+        (void)dlg32_u16(c);
+        return;
+    }
+    while (c->ok && x)
+        x = dlg32_u16(c);
+}
+static void dlg32_text(DLG32_CURSOR* c, char* s, unsigned cap)
+{
+    unsigned short x;
+    unsigned n = 0;
+    if (cap)
+        s[0] = 0;
+    x = dlg32_u16(c);
+    if (!c->ok || !x)
+        return;
+    if (x == 0xffffu)
+    {
+        (void)dlg32_u16(c);
+        return;
+    }
+    while (c->ok && x)
+    {
+        if (cap && n + 1 < cap)
+            s[n++] = (x < 128) ? (char)x : '?';
+        x = dlg32_u16(c);
+    }
+    if (cap)
+        s[n] = 0;
+}
+static int dlg32_validate(const void* raw, unsigned size, unsigned short* out)
+{
+    DLG32_CURSOR c;
+    unsigned style, i;
+    unsigned short count, extra;
+    if (!raw || size < 18)
+        return 0;
+    if (((const unsigned char*)raw)[0] == 1 && ((const unsigned char*)raw)[1] == 0 &&
+        ((const unsigned char*)raw)[2] == 0xff && ((const unsigned char*)raw)[3] == 0xff)
+        return 0;
+    c.p = raw;
+    c.size = size;
+    c.off = 0;
+    c.ok = 1;
+    style = dlg32_u32(&c);
+    (void)dlg32_u32(&c);
+    count = dlg32_u16(&c);
+    if (count > DLG32_MAX_ITEMS)
+        return 0;
+    (void)dlg32_u16(&c);
+    (void)dlg32_u16(&c);
+    (void)dlg32_u16(&c);
+    (void)dlg32_u16(&c);
+    dlg32_skip(&c);
+    dlg32_skip(&c);
+    dlg32_skip(&c);
+    if (style & DLG32_DS_SETFONT)
+    {
+        (void)dlg32_u16(&c);
+        dlg32_skip(&c);
+    }
+    for (i = 0; c.ok && i < count; i++)
+    {
+        dlg32_align(&c);
+        (void)dlg32_u32(&c);
+        (void)dlg32_u32(&c);
+        (void)dlg32_u16(&c);
+        (void)dlg32_u16(&c);
+        (void)dlg32_u16(&c);
+        (void)dlg32_u16(&c);
+        (void)dlg32_u16(&c);
+        dlg32_skip(&c);
+        dlg32_skip(&c);
+        extra = dlg32_u16(&c);
+        if (dlg32_need(&c, extra))
+            c.off += extra;
+    }
+    if (!c.ok)
+        return 0;
+    *out = count;
+    return 1;
+}
+static DLG32_STATE* dlg32_state(HWND h)
+{
+    unsigned i;
+    for (i = 0; i < 4; i++)
+        if (s_dlg32_states[i].used && s_dlg32_states[i].hwnd == h)
+            return &s_dlg32_states[i];
+    return 0;
+}
+void user32_dialog_on_destroy(HWND h)
+{
+    DLG32_STATE* s = dlg32_state(h);
+    if (s)
+        s->used = 0;
+}
+static DLG32_STATE* dlg32_alloc(int modal)
+{
+    unsigned i;
+    for (i = 0; i < 4; i++)
+        if (!s_dlg32_states[i].used)
+        {
+            s_dlg32_states[i].used = 1;
+            s_dlg32_states[i].modal = modal;
+            s_dlg32_states[i].ended = 0;
+            s_dlg32_states[i].result = 0;
+            return &s_dlg32_states[i];
+        }
+    return 0;
+}
+static const char* dlg32_class(unsigned short x, const char* s)
+{
+    if (x == 0x80)
+        return "BUTTON";
+    if (x == 0x81)
+        return "EDIT";
+    if (x == 0x82)
+        return "STATIC";
+    if (x == 0x83)
+        return "LISTBOX";
+    if (x == 0x84)
+        return "SCROLLBAR";
+    if (x == 0x85)
+        return "COMBOBOX";
+    return s[0] ? s : "STATIC";
+}
+static HWND dlg32_create(const void* raw, unsigned size, HWND parent, DLGPROC32 proc, LPARAM param, int modal,
+                         INT* result)
+{
+    DLG32_CURSOR c;
+    unsigned style, ex;
+    unsigned short count, i;
+    short x, y, w, h;
+    char title[WIN_TITLE_MAX];
+    HWND hwnd;
+    DLG32_STATE* state;
+    if (!dlg32_validate(raw, size, &count))
+        return 0;
+    c.p = raw;
+    c.size = size;
+    c.off = 0;
+    c.ok = 1;
+    style = dlg32_u32(&c);
+    ex = dlg32_u32(&c);
+    (void)dlg32_u16(&c);
+    x = (short)dlg32_u16(&c);
+    y = (short)dlg32_u16(&c);
+    w = (short)dlg32_u16(&c);
+    h = (short)dlg32_u16(&c);
+    dlg32_skip(&c);
+    dlg32_skip(&c);
+    dlg32_text(&c, title, sizeof(title));
+    if (style & DLG32_DS_SETFONT)
+    {
+        (void)dlg32_u16(&c);
+        dlg32_skip(&c);
+    }
+    if (style & DLG32_DS_CENTER)
+    {
+        x = (short)((GetSystemMetrics(0) - w * 2) / 2);
+        y = (short)((GetSystemMetrics(1) - h * 2) / 2);
+    }
+    hwnd = CreateWindowExA(ex, "", title, style | DLG32_WS_POPUP, x * 2, y * 2, w * 2, h * 2, parent, 0, 0, 0);
+    if (!hwnd)
+        return 0;
+    state = dlg32_alloc(modal);
+    if (!state)
+    {
+        (void)DestroyWindow(hwnd);
+        return 0;
+    }
+    state->hwnd = hwnd;
+    for (i = 0; i < count; i++)
+    {
+        unsigned is, ie;
+        unsigned short id, ord = 0, extra, first;
+        char cls[64], text[WIN_TITLE_MAX];
+        dlg32_align(&c);
+        is = dlg32_u32(&c);
+        ie = dlg32_u32(&c);
+        x = (short)dlg32_u16(&c);
+        y = (short)dlg32_u16(&c);
+        w = (short)dlg32_u16(&c);
+        h = (short)dlg32_u16(&c);
+        id = dlg32_u16(&c);
+        first = dlg32_u16(&c);
+        if (first == 0xffffu)
+            ord = dlg32_u16(&c);
+        else
+        {
+            c.off -= 2;
+            dlg32_text(&c, cls, sizeof(cls));
+        }
+        dlg32_text(&c, text, sizeof(text));
+        extra = dlg32_u16(&c);
+        if (!dlg32_need(&c, extra))
+        {
+            (void)DestroyWindow(hwnd);
+            return 0;
+        }
+        c.off += extra;
+        if (!CreateWindowExA(ie, dlg32_class(ord, cls), text, is | DLG32_WS_CHILD | DLG32_WS_VISIBLE, x * 2, y * 2,
+                             w * 2, h * 2, hwnd, (HMENU)(unsigned long)id, 0, 0))
+        {
+            (void)DestroyWindow(hwnd);
+            return 0;
+        }
+    }
+    (void)ShowWindow(hwnd, 1);
+    if (proc)
+        (void)proc(hwnd, DLG32_WM_INITDIALOG, (WPARAM)(unsigned long)GetDlgItem(hwnd, 1), param);
+    if (!modal)
+        return hwnd;
+    while (!state->ended)
+    {
+        struct user32_msg32 m;
+        if (!GetMessageA(&m, 0, 0, 0))
+            break;
+        if (m.hwnd == hwnd && proc)
+        {
+            if (!proc(hwnd, m.message, m.wParam, m.lParam))
+                (void)DefWindowProcA(hwnd, m.message, m.wParam, m.lParam);
+        }
+        else
+            (void)DispatchMessageA(&m);
+    }
+    if (result)
+        *result = state->result;
+    (void)DestroyWindow(hwnd);
+    return hwnd;
+}
+static const void* dlg32_resource(HINSTANCE inst, unsigned id, unsigned* size)
+{
+    DUET_RES_VIEW v;
+    DUET_RES_KEY t, n;
+    unsigned rva;
+    if (!inst || !duet_res_init(inst, &v))
+        return 0;
+    t.by_name = 0;
+    t.id = DUET_RES_TYPE_DIALOG;
+    t.name = 0;
+    t.name_len = 0;
+    n.by_name = 0;
+    n.id = id;
+    n.name = 0;
+    n.name_len = 0;
+    if (!duet_res_find(&v, &t, &n, 0, 0, &rva, size))
+        return 0;
+    return duet_res_at(&v, rva, *size);
+}
+__declspec(dllexport) INT __stdcall DialogBoxParamA(HINSTANCE i, const char* t, HWND p, void* f, LPARAM a)
+{
+    const void* r;
+    unsigned s;
+    INT o = -1;
+    unsigned long id = (unsigned long)t;
+    if (!id || id > 0xffffu)
+        return -1;
+    r = dlg32_resource(i, (unsigned)id, &s);
+    return r && dlg32_create(r, s, p, (DLGPROC32)f, a, 1, &o) ? o : -1;
+}
+__declspec(dllexport) INT __stdcall DialogBoxParamW(HINSTANCE i, const wchar_t16* t, HWND p, void* f, LPARAM a)
+{
+    return DialogBoxParamA(i, (const char*)t, p, f, a);
+}
+__declspec(dllexport) HWND __stdcall CreateDialogParamA(HINSTANCE i, const char* t, HWND p, void* f, LPARAM a)
+{
+    const void* r;
+    unsigned s;
+    unsigned long id = (unsigned long)t;
+    if (!id || id > 0xffffu)
+        return 0;
+    r = dlg32_resource(i, (unsigned)id, &s);
+    return r ? dlg32_create(r, s, p, (DLGPROC32)f, a, 0, 0) : 0;
+}
+__declspec(dllexport) HWND __stdcall CreateDialogParamW(HINSTANCE i, const wchar_t16* t, HWND p, void* f, LPARAM a)
+{
+    return CreateDialogParamA(i, (const char*)t, p, f, a);
+}
+__declspec(dllexport) BOOL __stdcall EndDialog(HWND h, INT r)
+{
+    DLG32_STATE* s = dlg32_state(h);
+    if (!s)
+        return 0;
+    s->result = r;
+    if (s->modal)
+    {
+        s->ended = 1;
+        (void)PostMessageA(h, DLG32_WM_CLOSE, 0, 0);
+        return 1;
+    }
+    return DestroyWindow(h);
+}
 /* ------------------------------------------------------------------
  * Enabled state
  * ------------------------------------------------------------------ */

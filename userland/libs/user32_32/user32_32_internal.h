@@ -208,6 +208,7 @@ void user32_strcpy_ascii(char* dst, unsigned cap, const char* src);
  * ------------------------------------------------------------------ */
 void user32_record_create(HWND hwnd, const char* cls, const char* title, HWND parent, int ctrl_id);
 void user32_record_destroy(HWND hwnd);
+void user32_dialog_on_destroy(HWND hwnd);
 void user32_record_set_title(HWND hwnd, const char* title);
 
 /* Dialog-item plumbing. A control is a child window whose creator
