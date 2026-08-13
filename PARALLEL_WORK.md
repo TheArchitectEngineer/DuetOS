@@ -611,10 +611,10 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Claimed**: 2026-07-31T07:23:57Z
 - **Status**: COMPLETED @ 2026-07-31T07:30:48Z
 
-### [ACTIVE] pe32-named-resources
+### [DONE] pe32-named-resources
 - **Session**: `Nathan-3364`
 - **Branch**: `claude/pe32-named-resources-20260813`
 - **Files**: `userland/libs/user32_32/user32_32_misc.c`
 - **Description**: No description provided
 - **Claimed**: 2026-08-13T13:59:54Z
-- **Status**: IN PROGRESS
+- **Status**: COMPLETED @ 2026-08-13T14:03:08Z
