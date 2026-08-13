@@ -1,0 +1,64 @@
+# cargo-fuzz driver crate for `duetos_wifi80211`.
+#
+# This crate is intentionally detached from the repo-root Rust
+# workspace (see the trailing `[workspace]` table below — the
+# standard `cargo fuzz init` convention). It is a host-side,
+# `std`-linked libFuzzer binary, never linked into the kernel; the
+# repo-root workspace only ever builds `duetos_wifi80211` itself
+# (a `#![no_std]` rlib) for the `x86_64-unknown-none` kernel target.
+#
+# See `README.md` in this directory and `tests/fuzz/README.md` for
+# build/run instructions and the untrusted-input rationale.
+
+[package]
+name = "duetos-wifi80211-fuzz"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+
+[dependencies.duetos_wifi80211]
+path = ".."
+
+[[bin]]
+name = "fuzz_frame_header"
+path = "fuzz_targets/fuzz_frame_header.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_beacon_body"
+path = "fuzz_targets/fuzz_beacon_body.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_ie"
+path = "fuzz_targets/fuzz_ie.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_country_ie"
+path = "fuzz_targets/fuzz_country_ie.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_eapol_key"
+path = "fuzz_targets/fuzz_eapol_key.rs"
+test = false
+doc = false
+bench = false
+
+# Detaches this crate from the repo-root workspace (see header comment).
+[workspace]

@@ -63,7 +63,11 @@ The IEEE 802.11 management-frame walker (`BeaconParse`) is **not** a
 C++ harness here: its byte-level parsing now lives in the memory-safe
 `duetos_wifi80211` Rust crate (`kernel/net/wifi80211_rust/`). The C++
 `beacon.cpp` is a thin FFI caller with no raw-byte parsing left to
-fuzz at this layer; the Rust walker is fuzzed via cargo-fuzz.
+fuzz at this layer; the Rust walker is fuzzed via cargo-fuzz at
+[`kernel/net/wifi80211_rust/fuzz/`](../../kernel/net/wifi80211_rust/fuzz/)
+(5 targets, one per FFI entry point — frame header, beacon body, IE
+walker, Country IE, EAPOL-Key) — see that directory's `README.md` for
+build/run instructions.
 
 ## Why these parsers
 

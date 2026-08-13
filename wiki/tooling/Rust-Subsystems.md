@@ -150,6 +150,9 @@ The repository now has one shared Rust foundation **and actual Rust subsystem co
   (Information Element) list, and EAPOL-Key (4-way handshake)
   descriptors. `kernel/net/wireless/beacon.cpp::BeaconParse`
   delegates the frame header, body, and IE walks to the crate.
+  Fuzzed directly via `cargo fuzz` (not a `tests/fuzz/fuzz_*.cpp`
+  harness — see `kernel/net/wifi80211_rust/fuzz/`), one target per
+  FFI entry point.
 - `/kernel/net/hci_rust/` (`duetos_hci`) parses Bluetooth HCI
   event packets and the Command Complete, Command Status,
   Disconnection Complete, LE Meta, Read_Local_Version, and

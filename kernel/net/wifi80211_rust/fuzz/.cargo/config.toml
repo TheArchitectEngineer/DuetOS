@@ -1,0 +1,24 @@
+# Detach this cargo-fuzz build from the repo-root kernel target pin.
+#
+# The repo-root `.cargo/config.toml` pins `build.target =
+# "x86_64-unknown-none"` and `unstable.build-std = ["core", "alloc"]`
+# for the kernel's bare-metal Rust crates. Cargo's config-file search
+# walks every ancestor directory regardless of workspace boundaries
+# (the `[workspace]` table in this crate's `Cargo.toml` only detaches
+# workspace *membership*, not config-file inheritance), so without
+# this override a `cargo fuzz` build here would inherit that pin too.
+#
+# `unstable.build-std = ["core", "alloc"]` is the dangerous one to
+# inherit: build-std replaces the sysroot with only the listed
+# crates, and this crate's libFuzzer binaries need full `std` (via
+# `libfuzzer-sys`), which is absent from that list — so an inherited
+# pin would make the fuzz binaries fail to find `std` entirely.
+# Clearing it here (Cargo config values are overridden, not merged,
+# by the closer file for a given key) restores the toolchain's normal
+# prebuilt `std` sysroot for this crate's host-target build.
+#
+# `build.target` does not need a matching override: `cargo fuzz`
+# always passes its own `--target <host-triple>` on the command line,
+# and a CLI flag already wins over any `build.target` config value.
+[unstable]
+build-std = []
