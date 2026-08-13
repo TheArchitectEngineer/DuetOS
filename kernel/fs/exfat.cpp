@@ -1041,6 +1041,7 @@ bool ExfatLookupRootEntry(u32 index, const char* name, DirEntry* out)
 
 void ExfatRefreshVolume(u32 index)
 {
+    ExfatGuard guard;
     if (index >= g_volume_count)
         return;
     RefreshRootSnapshot(g_volumes[index]);
