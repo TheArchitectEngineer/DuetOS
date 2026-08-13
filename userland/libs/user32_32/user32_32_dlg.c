@@ -199,13 +199,6 @@ __declspec(dllexport) UINT __stdcall GetDlgItemInt(HWND dlg, int id, BOOL* trans
  * Dialog templates — blocked on an RT_DIALOG template decoder
  * ------------------------------------------------------------------ */
 
-// STUB: a dialog template cannot be read, so no controls can be
-// instantiated. The rationale that used to sit here -- "no PE resource
-// (.rsrc) parser exists anywhere in the tree" -- is stale: the walker
-// landed in userland/libs/common/pe_resources.h and this DLL already
-// uses it for LoadString / LoadIcon / LoadCursor / LoadBitmap. What is
-// still missing is the layer above it: a DLGTEMPLATE / DLGITEMTEMPLATE
-// decoder and the control instantiation it drives. Returning -1 is the
 /* Resource-template implementation intentionally accepts only resource IDs.
  * The indirect APIs have no byte length, so treating a caller pointer as a
  * bounded template would not meet the malformed-input contract. */
