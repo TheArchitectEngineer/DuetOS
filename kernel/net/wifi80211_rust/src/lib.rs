@@ -221,17 +221,20 @@ fn parse_beacon_body(buf: &[u8], out: &mut DuetosWifiBeaconBody) -> bool {
 /// Decode one Information Element starting at `off`. Returns
 /// `false` on a hard parse error (truncated tag).
 fn parse_ie(buf: &[u8], off: usize, out: &mut DuetosWifiIe) -> bool {
-    if off + 2 > buf.len() {
+    // Keep all offsets in subtraction form: the FFI accepts a usize, so
+    // addition here could wrap before the bounds check on 64-bit callers.
+    if off > buf.len() || buf.len() - off < 2 {
         return false;
     }
     let id = buf[off];
     let len = buf[off + 1];
-    if off + 2 + (len as usize) > buf.len() {
+    let payload_off = off + 2;
+    if (len as usize) > buf.len() - payload_off {
         return false;
     }
     out.id = id;
     out.len = len;
-    out.payload_offset = (off + 2) as u32;
+    out.payload_offset = payload_off as u32;
     out.ok = 1;
     true
 }
