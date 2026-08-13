@@ -265,30 +265,6 @@ __declspec(dllexport) BOOL __stdcall EndDialog(HWND dlg, INT result)
     return duet_syscall1(SYS_WIN_DESTROY, (unsigned)(unsigned long)dlg) ? 1 : 0;
 }
 
-// STUB: no table is ever translated against, so no message is ever
-// consumed. The blocker is not the .rsrc walker -- that exists -- but
-// this DLL's LoadAcceleratorsA/W, which still return NULL because
-// RT_ACCELERATOR needs the KeyCode->VK translation the x86_64 sibling
-// has (user32_load_accel in userland/libs/user32/user32.c) and this
-// half does not. Returning 0 ("not translated") keeps the caller's pump
-// correct — it just dispatches the message normally, which is what
-// happens on Windows when no accelerator matches.
-__declspec(dllexport) INT __stdcall TranslateAcceleratorA(HWND h, HANDLE accel, void* msg)
-{
-    (void)h;
-    (void)accel;
-    (void)msg;
-    return 0;
-}
-
-__declspec(dllexport) INT __stdcall TranslateAcceleratorW(HWND h, HANDLE accel, void* msg)
-{
-    (void)h;
-    (void)accel;
-    (void)msg;
-    return 0;
-}
-
 /* ------------------------------------------------------------------
  * Enabled state
  * ------------------------------------------------------------------ */
