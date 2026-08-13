@@ -163,5 +163,6 @@ EXPORTS
     LoadImageW
     LoadAcceleratorsA
     LoadAcceleratorsW
+    DestroyAcceleratorTable
     LoadBitmapA
     LoadBitmapW

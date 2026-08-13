@@ -773,18 +773,191 @@ __declspec(dllexport) HANDLE __stdcall LoadBitmapW(HINSTANCE inst, const wchar_t
     const DUET_RES_KEY key = user32_32_res_key_from_wide(name);
     return user32_32_load_bitmap_impl(inst, &key);
 }
-// STUB: returns NULL - RT_ACCELERATOR needs KeyCode->VK translation.
-__declspec(dllexport) HANDLE __stdcall LoadAcceleratorsA(HINSTANCE inst, const char* name)
+/* Accelerator tables are copied into process-owned slots rather than retaining
+ * a raw pointer into the module's .rsrc mapping.  That both makes handles
+ * independently verifiable and prevents a later FreeLibrary from leaving a
+ * dangling table behind.  The deliberately finite allocation is reclaimed by
+ * DestroyAcceleratorTable, just like a normal Win32 HACCEL. */
+#define USER32_ACCEL_TABLES 4u
+#define USER32_ACCEL_ENTRIES 64u
+#define USER32_ACCEL_ENTRY_SIZE 8u
+#define USER32_WM_KEYDOWN 0x0100u
+#define USER32_WM_SYSKEYDOWN 0x0104u
+#define USER32_WM_COMMAND 0x0111u
+#define USER32_FVIRTKEY 0x01u
+#define USER32_FSHIFT 0x04u
+#define USER32_FCONTROL 0x08u
+#define USER32_FALT 0x10u
+
+struct user32_accel_table
 {
-    (void)inst;
-    (void)name;
+    unsigned int in_use;
+    unsigned int count;
+    unsigned char entries[USER32_ACCEL_ENTRIES][USER32_ACCEL_ENTRY_SIZE];
+};
+
+static struct user32_accel_table g_accel_tables[USER32_ACCEL_TABLES];
+static volatile unsigned int g_accel_lock;
+
+/* Defined in the string-resource section below. */
+static int user32_string_view(HINSTANCE inst, DUET_RES_VIEW* view);
+
+static unsigned int user32_le16(const unsigned char* p)
+{
+    return (unsigned int)p[0] | ((unsigned int)p[1] << 8);
+}
+
+static void user32_accel_lock(void)
+{
+    while (__sync_lock_test_and_set(&g_accel_lock, 1u) != 0u)
+    {
+    }
+}
+
+static void user32_accel_unlock(void)
+{
+    __sync_lock_release(&g_accel_lock);
+}
+
+static struct user32_accel_table* user32_accel_from_handle(HANDLE accel)
+{
+    unsigned int i;
+    for (i = 0; i < USER32_ACCEL_TABLES; ++i)
+    {
+        if ((HANDLE)(unsigned long)&g_accel_tables[i] == accel && g_accel_tables[i].in_use)
+            return &g_accel_tables[i];
+    }
+    return (struct user32_accel_table*)0;
+}
+
+static HANDLE user32_load_accelerators(HINSTANCE inst, unsigned int name_id)
+{
+    DUET_RES_VIEW view;
+    DUET_RES_KEY type;
+    DUET_RES_KEY name;
+    unsigned int rva;
+    unsigned int size;
+    unsigned int count;
+    unsigned int i;
+    const unsigned char* data;
+
+    if (!user32_string_view(inst, &view))
+        return (HANDLE)0;
+    type.by_name = 0;
+    type.id = DUET_RES_TYPE_ACCELERATOR;
+    type.name = (const unsigned short*)0;
+    type.name_len = 0;
+    name.by_name = 0;
+    name.id = name_id;
+    name.name = (const unsigned short*)0;
+    name.name_len = 0;
+    if (!duet_res_find(&view, &type, &name, 0u, 0, &rva, &size) || size == 0u ||
+        (size % USER32_ACCEL_ENTRY_SIZE) != 0u)
+        return (HANDLE)0;
+    count = size / USER32_ACCEL_ENTRY_SIZE;
+    if (count > USER32_ACCEL_ENTRIES)
+        return (HANDLE)0;
+    data = duet_res_at(&view, rva, size);
+    if (!data)
+        return (HANDLE)0;
+    user32_accel_lock();
+    for (i = 0; i < USER32_ACCEL_TABLES; ++i)
+    {
+        unsigned int j;
+        if (g_accel_tables[i].in_use)
+            continue;
+        for (j = 0; j < count; ++j)
+        {
+            unsigned int b;
+            for (b = 0; b < USER32_ACCEL_ENTRY_SIZE; ++b)
+                g_accel_tables[i].entries[j][b] = data[j * USER32_ACCEL_ENTRY_SIZE + b];
+        }
+        g_accel_tables[i].count = count;
+        g_accel_tables[i].in_use = 1u;
+        user32_accel_unlock();
+        return (HANDLE)(unsigned long)&g_accel_tables[i];
+    }
+    user32_accel_unlock();
     return (HANDLE)0;
 }
+
+__declspec(dllexport) HANDLE __stdcall LoadAcceleratorsA(HINSTANCE inst, const char* name)
+{
+    const unsigned long id = (unsigned long)(unsigned long)name;
+    return id < 0x10000ul ? user32_load_accelerators(inst, (unsigned int)id) : (HANDLE)0;
+}
+
 __declspec(dllexport) HANDLE __stdcall LoadAcceleratorsW(HINSTANCE inst, const wchar_t16* name)
 {
-    (void)inst;
-    (void)name;
-    return (HANDLE)0;
+    const unsigned long id = (unsigned long)(unsigned long)name;
+    return id < 0x10000ul ? user32_load_accelerators(inst, (unsigned int)id) : (HANDLE)0;
+}
+
+__declspec(dllexport) BOOL __stdcall DestroyAcceleratorTable(HANDLE accel)
+{
+    struct user32_accel_table* table;
+    user32_accel_lock();
+    table = user32_accel_from_handle(accel);
+    if (!table)
+    {
+        user32_accel_unlock();
+        return 0;
+    }
+    table->count = 0u;
+    table->in_use = 0u;
+    user32_accel_unlock();
+    return 1;
+}
+
+static INT user32_translate_accelerator(HWND hwnd, HANDLE accel, const struct user32_msg32* msg)
+{
+    struct user32_accel_table* table;
+    unsigned int i;
+    unsigned int command = 0u;
+    BOOL matched = 0;
+    const unsigned int key = msg ? msg->wParam & 0xffffu : 0u;
+    const BOOL shift = (GetKeyState(0x10) & 0x8000) != 0;
+    const BOOL ctrl = (GetKeyState(0x11) & 0x8000) != 0;
+    const BOOL alt = (GetKeyState(0x12) & 0x8000) != 0;
+    if (!msg || (msg->message != USER32_WM_KEYDOWN && msg->message != USER32_WM_SYSKEYDOWN))
+        return 0;
+    user32_accel_lock();
+    table = user32_accel_from_handle(accel);
+    if (!table)
+    {
+        user32_accel_unlock();
+        return 0;
+    }
+    for (i = 0; i < table->count; ++i)
+    {
+        const unsigned char* e = table->entries[i];
+        const unsigned int virt = e[0];
+        if (user32_le16(e + 2) != key)
+            continue;
+        if ((virt & USER32_FVIRTKEY) != 0u &&
+            (((virt & USER32_FSHIFT) != 0u) != shift || ((virt & USER32_FCONTROL) != 0u) != ctrl ||
+             ((virt & USER32_FALT) != 0u) != alt))
+            continue;
+        command = user32_le16(e + 4);
+        matched = 1;
+        break;
+    }
+    user32_accel_unlock();
+    if (!matched)
+        return 0;
+    (void)duet_syscall4(SYS_WIN_POST_MSG, (unsigned)(unsigned long)hwnd, USER32_WM_COMMAND,
+                        (unsigned)((1u << 16) | command), 0u);
+    return 1;
+}
+
+__declspec(dllexport) INT __stdcall TranslateAcceleratorA(HWND hwnd, HANDLE accel, void* msg)
+{
+    return user32_translate_accelerator(hwnd, accel, (const struct user32_msg32*)msg);
+}
+
+__declspec(dllexport) INT __stdcall TranslateAcceleratorW(HWND hwnd, HANDLE accel, void* msg)
+{
+    return user32_translate_accelerator(hwnd, accel, (const struct user32_msg32*)msg);
 }
 
 __declspec(dllexport) HANDLE __stdcall LoadImageA(HINSTANCE inst, const char* name, unsigned type, int w, int h,
