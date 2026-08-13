@@ -13,12 +13,14 @@
 # crates, and this crate's libFuzzer binaries need full `std` (via
 # `libfuzzer-sys`), which is absent from that list — so an inherited
 # pin would make the fuzz binaries fail to find `std` entirely.
-# Clearing it here (Cargo config values are overridden, not merged,
-# by the closer file for a given key) restores the toolchain's normal
-# prebuilt `std` sysroot for this crate's host-target build.
+# Cargo's list-valued config is merged across ancestor files, so an empty
+# closer list cannot remove the root `core`/`alloc` entries. Adding `std`
+# makes Cargo build one complete host sysroot for the fuzz binary; libFuzzer
+# and the production no_std parser then use that same `core` instead of
+# mixing a rebuilt core with the toolchain's prebuilt std.
 #
 # `build.target` does not need a matching override: `cargo fuzz`
 # always passes its own `--target <host-triple>` on the command line,
 # and a CLI flag already wins over any `build.target` config value.
 [unstable]
-build-std = []
+build-std = ["std"]
