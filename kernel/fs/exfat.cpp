@@ -1025,6 +1025,20 @@ const DirEntry* ExfatFindInRoot(const Volume* v, const char* name)
     return nullptr;
 }
 
+bool ExfatLookupRootEntry(u32 index, const char* name, DirEntry* out)
+{
+    if (name == nullptr || out == nullptr)
+        return false;
+    ExfatGuard guard;
+    if (index >= g_volume_count)
+        return false;
+    const DirEntry* entry = ExfatFindInRoot(&g_volumes[index], name);
+    if (entry == nullptr)
+        return false;
+    *out = *entry;
+    return true;
+}
+
 void ExfatRefreshVolume(u32 index)
 {
     if (index >= g_volume_count)
@@ -1082,7 +1096,7 @@ i64 ExfatReadAt(const Volume* v, const DirEntry* e, u64 offset, void* out, u64 l
         const u64 lba = ClusterToLba(*v, cluster) + sec_in_cluster;
         const u64 chunk = (bps - in_sec) < (len - got) ? (bps - in_sec) : (len - got);
         if (drivers::storage::BlockDeviceRead(v->block_handle, lba, 1, g_write_scratch) != 0)
-            return got > 0 ? i64(got) : -1;
+            return -1;
         for (u64 i = 0; i < chunk; ++i)
             dst[got + i] = g_write_scratch[in_sec + i];
         got += chunk;

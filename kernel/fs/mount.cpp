@@ -366,15 +366,15 @@ bool ExfatLookup(u32 block_handle, const char* subpath, void* out_node)
     }
     comp[ci] = '\0';
 
-    const exfat::DirEntry* e = exfat::ExfatFindInRoot(v, comp);
-    if (e == nullptr)
+    exfat::DirEntry entry{};
+    if (!exfat::ExfatLookupRootEntry(vol_idx, comp, &entry))
     {
         return false;
     }
     out->backend = VfsBackend::Exfat;
     out->ramfs = nullptr;
     out->exfat_volume_idx = vol_idx;
-    out->exfat_entry = *e;
+    out->exfat_entry = entry;
     return true;
 }
 

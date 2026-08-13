@@ -154,6 +154,12 @@ void ExfatRefreshVolume(u32 index);
 /// next mutating call refreshes it.
 const DirEntry* ExfatFindInRoot(const Volume* v, const char* name);
 
+/// Atomically copies a root-directory entry out of the registered volume at
+/// `index`.  Use this at VFS boundaries instead of retaining the pointer from
+/// ExfatFindInRoot: a successful mutation may refresh the registry snapshot
+/// concurrently.
+bool ExfatLookupRootEntry(u32 index, const char* name, DirEntry* out);
+
 /// Offset-aware read-only access, mirroring `fat32::Fat32ReadAt`. Reads
 /// up to `len` bytes starting at byte `offset` in `e`'s data into `out`.
 /// Walks the FAT chain to skip past `offset`, then reads sector-by-
