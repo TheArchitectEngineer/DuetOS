@@ -60,7 +60,11 @@ endif()
 if(MSVC AND DUETOS_HOST_TESTS_TSAN)
     message(FATAL_ERROR "DUETOS_HOST_TESTS_TSAN requires a compiler with -fsanitize=thread")
 endif()
-if(NOT MSVC)
+# The PE32 userland implementation uses the GNU i386 syscall inline-asm
+# dialect. Register this host fixture only for MinGW, where that dialect and
+# PE32 ABI bridge are both available; generic Linux GCC is intentionally not
+# a substitute for this target.
+if(MINGW)
     if(DUETOS_HOST_TESTS_SANITIZERS)
         add_compile_options(-fsanitize=address,undefined -fno-omit-frame-pointer)
         add_link_options(-fsanitize=address,undefined)
