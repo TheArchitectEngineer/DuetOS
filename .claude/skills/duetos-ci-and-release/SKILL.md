@@ -222,4 +222,3 @@ Volatile facts (re-check if stale): the advisory status of `diff-boot-smoke` and
 (both marked "until stabilised" in workflow comments — may be promoted to gates), the
 `RELEASE_SMOKE_GATE` repo variable's value (not readable from the tree), fuzz's 90 s budget,
 and the 7-profile smoke matrix (grows as smoke profiles land in `kernel/test/smoke_profile.h`).
-
