@@ -60,11 +60,7 @@ endif()
 if(MSVC AND DUETOS_HOST_TESTS_TSAN)
     message(FATAL_ERROR "DUETOS_HOST_TESTS_TSAN requires a compiler with -fsanitize=thread")
 endif()
-# The PE32 userland implementation uses the GNU i386 syscall inline-asm
-# dialect. Register this host fixture only for MinGW, where that dialect and
-# PE32 ABI bridge are both available; generic Linux GCC is intentionally not
-# a substitute for this target.
-if(MINGW)
+if(NOT MSVC)
     if(DUETOS_HOST_TESTS_SANITIZERS)
         add_compile_options(-fsanitize=address,undefined -fno-omit-frame-pointer)
         add_link_options(-fsanitize=address,undefined)
@@ -213,8 +209,9 @@ endfunction()
 
 # PE32 resource-dialog parser: the test includes the freestanding DLL TU so
 # it can exercise the bounds validator against exact wire-format fixtures.
-# Host pointer-width diagnostics are expected for an i386 ABI source.
-if(NOT MSVC)
+# It uses GNU i386 syscall inline assembly and is therefore a MinGW-only
+# fixture; Linux GCC is not an ABI-compatible substitute.
+if(MINGW)
     add_executable(test_user32_32_dialog_template test_user32_32_dialog_template.c)
     add_test(NAME user32_32_dialog_template COMMAND test_user32_32_dialog_template)
     target_compile_options(
