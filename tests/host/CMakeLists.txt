@@ -207,6 +207,20 @@ function(add_host_test name)
     add_test(NAME ${name} COMMAND test_${name})
 endfunction()
 
+# PE32 resource-dialog parser: the test includes the freestanding DLL TU so
+# it can exercise the bounds validator against exact wire-format fixtures.
+# Host pointer-width diagnostics are expected for an i386 ABI source.
+if(NOT MSVC)
+    add_executable(test_user32_32_dialog_template test_user32_32_dialog_template.c)
+    add_test(NAME user32_32_dialog_template COMMAND test_user32_32_dialog_template)
+    target_compile_options(
+        test_user32_32_dialog_template
+        PRIVATE -Wno-pointer-to-int-cast -Wno-int-to-pointer-cast -Wno-pedantic
+    )
+    target_compile_options(test_user32_32_dialog_template PRIVATE -ffunction-sections -fdata-sections)
+    target_link_options(test_user32_32_dialog_template PRIVATE "-Wl,--gc-sections")
+endif()
+
 add_host_test(result)
 add_host_test(syscall_error)
 target_sources(test_syscall_error PRIVATE "${CMAKE_SOURCE_DIR}/../../kernel/syscall/error.cpp")

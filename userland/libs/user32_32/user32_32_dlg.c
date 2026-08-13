@@ -208,7 +208,7 @@ HWND __stdcall CreateWindowExA(DWORD, const char*, const char*, DWORD, int, int,
                                void*);
 BOOL __stdcall DestroyWindow(HWND);
 BOOL __stdcall ShowWindow(HWND, INT);
-BOOL __stdcall GetMessageA(struct user32_msg32*, HWND, UINT, UINT);
+INT __stdcall GetMessageA(struct user32_msg32*, HWND, UINT, UINT);
 LRESULT __stdcall DispatchMessageA(const struct user32_msg32*);
 typedef INT(__stdcall* DLGPROC32)(HWND, UINT, WPARAM, LPARAM);
 #define DLG32_MAX_ITEMS 64u
@@ -520,7 +520,8 @@ static HWND dlg32_create(const void* raw, unsigned size, HWND parent, DLGPROC32 
     while (!state->ended)
     {
         struct user32_msg32 m;
-        if (!GetMessageA(&m, 0, 0, 0))
+        const INT get_result = GetMessageA(&m, 0, 0, 0);
+        if (get_result <= 0)
         {
             (void)DestroyWindow(hwnd);
             return 0;
