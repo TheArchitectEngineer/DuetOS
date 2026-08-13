@@ -1,6 +1,6 @@
 # DuetOS — Design Decisions Log
 
-_Last updated: 2026-05-12 (skeleton Rust crates lifted to production)_
+_Last updated: 2026-08-13 (exFAT joins the VFS mount vtable, read-only)_
 
 The most recent formal entries below run through 042 (HPET self-test);
 slices that landed during 2026-04-25 → 2026-05-04 (windowing / GDI /
@@ -14628,3 +14628,111 @@ _2026-08-05_
 - **Revisit when:** Force feedback needs a command channel, or a
   wireless receiver adds battery fields that force a wire version
   bump.
+
+---
+
+## 066 — exFAT joins the VFS mount vtable read-only, root dir only, indexed like FAT32
+
+_2026-08-13_
+
+- **Scope:** `kernel/fs/mount.h`, `kernel/fs/mount.cpp`,
+  `kernel/fs/vfs.h`, `kernel/fs/vfs.cpp`, `kernel/fs/exfat.h`,
+  `kernel/fs/exfat.cpp`, `kernel/fs/exfat_selftest.cpp`,
+  `kernel/shell/shell_fsio.cpp`, `kernel/core/boot_bringup.cpp`.
+- **Decision:** `FsType::Exfat` / `VfsBackend::Exfat` are wired the
+  same way FAT32 is: the mount registry's third `VfsMount` argument is
+  the exFAT volume REGISTRY INDEX (`fs::exfat::ExfatVolumeByIndex`),
+  not the raw block-layer handle — the convention `ext4`/`NTFS` use
+  instead. `ExfatLookup` resolves only the bare mount point (a
+  synthetic root-dir `DirEntry`, mirroring `Fat32LookupPath`'s
+  synthetic root) or a single root-dir component via
+  `ExfatFindInRoot`; any subpath with a second component misses rather
+  than mis-resolving, matching the existing "no subdirectory
+  recursion" GAP. Reads dispatch through a new `ExfatReadAt` (mirrors
+  `fat32::Fat32ReadAt`) — offset-aware, clamped to the file's logical
+  size, no mutation. `VfsBackendLookupFn` gained no write arm, so the
+  live mutation API (`ExfatWriteInPlace` / `ExfatAppendInRoot` /
+  `ExfatCreateInRoot` / `ExfatTruncateInRoot`) stays reachable only
+  through the `exfat::` registry directly, never through
+  `VfsResolve`. The boot-tail auto-mount loop (right after
+  `ExfatScanAll()`) registers every entry `ExfatVolumeCount()` already
+  holds at `/disk/exfat<N>` — it adds no new admission check, because
+  `ExfatProbe`'s ownership gate (`ExfatVolumeIsDuetOsOwned`, see
+  entry 2026-06-06) already refused to register a foreign volume, so
+  nothing reaches `ExfatVolumeByIndex` for the mount loop to see that
+  wasn't already admitted.
+- **Why:** The index-vs-handle choice was pre-committed by an in-code
+  comment left at the site (`mount.cpp`'s prior `VfsBackendForFsType`
+  default arm): "add an `ExfatLookup` arm beside `g_fat32_ops`, the
+  same way FAT32 routes its VfsNode through the volume index." exFAT's
+  registry (`ExfatVolumeByIndex`) only supports index lookup today
+  (no `ExfatVolumeByHandle` exists, unlike ext4/NTFS), so the FAT32
+  convention was also the path of least new surface. Keeping the
+  vtable read-only avoids adding a generic write arm to
+  `VfsBackendOps` for a single backend's benefit, and keeps this slice
+  from touching the ownership-gate policy at all.
+- **Rules out / defers:** A generic VFS write dispatch path (would
+  need a `VfsBackendWriteFn` alongside `lookup`), exFAT subdirectory
+  resolution through `VfsResolve` (still root-dir only), and any
+  `ExfatVolumeByHandle`-based wiring (would only make sense if a
+  future slice needs handle-addressed exFAT lookups the way ext4/NTFS
+  do).
+- **Revisit when:** exFAT subdirectory recursion lands in
+  `fs/exfat.cpp` (the VFS lookup's single-component restriction should
+  lift in step), or a write-capable VFS dispatch path is designed for
+  any read/write backend generically rather than per-backend.
+- **Addendum (2026-08-13, same day):** three corrections landed before
+  this slice was considered done:
+  - **Index-0 collision with `VfsMount`'s handle-zero sentinel.**
+    `VfsMount` rejects a literal `block_handle == 0` for every non-Ram
+    backend (`fs/mount.cpp`), which collides with exFAT registry index
+    0 — the always-present first volume — the exact same hazard
+    FAT32's own boot auto-mount loop already has (`VfsMount(mp,
+    FsType::Fat32, i)` starting at `i = 0`; noted here, not fixed
+    here — out of this slice's scope). `ExfatLookup` now encodes the
+    mount handle as `index + 1` and decodes it back
+    (`fs/mount.cpp`); `VfsNode::exfat_volume_idx` and every caller
+    outside `ExfatLookup` still deal in the true, un-offset index.
+    Both the boot auto-mount loop and `ExfatSelfTest` were updated to
+    pass `index + 1` and to assert the self-test's synthetic volume is
+    actually registry index 0 (rather than assume it), so this exact
+    edge is what gets exercised on every boot instead of silently
+    drifting to a later index.
+  - **`g_write_scratch` had no lock.** The block-IO scratch buffer
+    `ExfatReadAt` and the root-dir mutation API (`ExfatWriteInPlace` /
+    `ExfatAppendInRoot` / `ExfatCreateInRoot` / `ExfatTruncateInRoot`)
+    all share was unguarded — safe only as long as exFAT was
+    unreachable from the VFS and touched solely by the single-threaded
+    boot self-test. Once `VfsBackend::Exfat` went live, concurrent
+    ring-3 readers became possible. Added `g_exfat_mutex` +
+    `ExfatGuard` (`fs/exfat.cpp`), a direct mirror of
+    `fs/fat32.cpp`'s `g_fat32_mutex` / `Fat32Guard` — `sched::Mutex`
+    (sleep-capable, since block IO can block), recursive re-entry for
+    the write path's internal nested calls, pre-scheduler bypass. New
+    lock class `kLockClassExfat` (`sync/lockdep.h`), same tier as
+    `kLockClassFat32`.
+  - **`ExfatReadAt` must fail closed on corrupt metadata.** A nonzero
+    `size_bytes` with `first_cluster < 2`, or a FAT chain that hits
+    EOC/bad-cluster before delivering as many bytes as `size_bytes`
+    promises, both used to return a value indistinguishable from a
+    legitimate EOF (0) or short read (`got` bytes) — `ExfatReadAt` now
+    returns -1 for both, matching the "fail closed on inconsistent
+    on-disk state" convention `ExfatProbe`'s ownership gate already
+    follows. Covered by two hand-built-`DirEntry` cases in
+    `ExfatSelfTest` (Phase 7) that don't go through the write path, so
+    they exercise the read path's own defenses independent of what the
+    write path could ever produce.
+  - **`ExfatSelfTest`'s VFS phase resolved against a stale registry
+    snapshot.** The mutation API needs a non-const `Volume*`, but
+    `ExfatVolumeByIndex` only ever hands out `const Volume*`, so the
+    self-test drives its CRUD phases on a stack copy (`Volume vol = *reg`)
+    per the file's own header comment — `RefreshRootSnapshot` only
+    updates whichever `Volume` instance the caller passed in, so the
+    registry's own cached `root_entries` (what `ExfatLookup` /
+    `ExfatVolumeByIndex` actually read) never learned about the
+    CRUD-phase file. The VFS integration phase that resolves
+    `HELLO.TXT` through the real mount path would have missed every
+    time. Added `ExfatRefreshVolume(index)` (`fs/exfat.cpp` /
+    `fs/exfat.h`) — re-walks the registry slot's root directory
+    directly — and call it once, right before the VFS phase, so the
+    registry observes what the CRUD phases actually wrote to disk.

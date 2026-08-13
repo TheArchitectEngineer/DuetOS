@@ -140,6 +140,7 @@ inline constexpr LockClass kLockClassMax = 256;
 ///   3.  kLockClassKObject       (IPC object refcount ledger)
 ///   4.  kLockClassKStack        (kernel-stack arena)
 ///   5.  kLockClassFat32         (FAT32 driver mutex)
+///   5a. kLockClassExfat         (exFAT driver mutex)
 ///   6.  kLockClassWifi          (WiFi driver mutex)
 ///   7.  kLockClassBreakpoints   (kernel-debug breakpoint table)
 ///   8.  kLockClassCleanroomTrace (cleanroom-mode trace ring)
@@ -227,6 +228,16 @@ inline constexpr LockClass kLockClassGuiSendService = 0x0D;
 /// GUI send transaction transitions nested strictly inside the owning
 /// GuiSendService lock. Transaction code never calls back into its service.
 inline constexpr LockClass kLockClassGuiSendTransaction = 0x0E;
+/// exFAT driver mutex (`fs/exfat.cpp::g_exfat_mutex`). Serialises the
+/// shared block-IO scratch buffer (`g_write_scratch`) across the read
+/// path (`ExfatReadAt`) and the root-dir mutation API
+/// (`ExfatWriteInPlace` / `ExfatAppendInRoot` / `ExfatCreateInRoot` /
+/// `ExfatTruncateInRoot`) now that exFAT is reachable concurrently
+/// through the VFS (`VfsBackend::Exfat`). Mirrors `kLockClassFat32`
+/// exactly — same recursive-reentry + pre-scheduler-bypass guard
+/// shape, same acquire ordering (BELOW scheduler / kobject, ABOVE any
+/// future per-device queue lock).
+inline constexpr LockClass kLockClassExfat = 0x0F;
 
 static_assert(kLockClassGuiSendService != kLockClassGuiSendTransaction);
 static_assert(kLockClassGuiSendService != kLockClassUnclassified);

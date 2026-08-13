@@ -40,6 +40,7 @@ enum class FsType : u32
     Ntfs = 3,
     DuetFs = 4,
     RamVol = 5, ///< frame-backed writable RAM volume; synth (block_handle == 0) like Ramfs
+    Exfat = 6,  ///< read-only VFS tier; fs::exfat::* (root directory only, see fs/exfat.h)
 };
 
 const char* FsTypeName(FsType t);
@@ -132,8 +133,8 @@ struct VfsBackendOps
 };
 
 /// Returns the ops table for `t`, or nullptr if no backend is
-/// registered. FAT32, DuetFS, RamVol, ext4, and NTFS are wired; each
-/// surfaces a backend-tagged VfsNode that VfsResolve hands back.
+/// registered. FAT32, DuetFS, RamVol, ext4, NTFS, and exFAT are wired;
+/// each surfaces a backend-tagged VfsNode that VfsResolve hands back.
 const VfsBackendOps* VfsBackendForFsType(FsType t);
 
 } // namespace duetos::fs

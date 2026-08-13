@@ -1,6 +1,7 @@
 #pragma once
 
 #include "util/types.h"
+#include "fs/exfat.h"
 #include "fs/fat32.h"
 #include "fs/ramfs.h"
 
@@ -118,6 +119,7 @@ enum class VfsBackend : u8
     RamVol = 4, ///< frame-backed writable RAM volume (fs::RamVol*, mounted at /run)
     Ext4 = 5,   ///< ext4 read-only tier (Linux data partitions); fs::ext4::*
     Ntfs = 6,   ///< NTFS read-only tier (Windows interop); fs::ntfs::*
+    Exfat = 7,  ///< exFAT read-only tier (root dir only); fs::exfat::*
 };
 
 /// Resolved node — backend-tagged. Storage is by-value so the
@@ -167,6 +169,13 @@ struct VfsNode
     u64 ntfs_mft_reference;
     u64 ntfs_size_bytes;
     bool ntfs_is_dir;
+    /// exFAT-backed nodes — volume REGISTRY INDEX (mirrors
+    /// `fat32_volume_idx`; indexes `fs::exfat::ExfatVolumeByIndex`) plus
+    /// a snapshotted root-directory `DirEntry`. Root directory only —
+    /// exFAT has no subdirectory recursion (see fs/exfat.h). Reads
+    /// re-walk the FAT chain via `exfat::ExfatReadAt`.
+    u32 exfat_volume_idx;
+    exfat::DirEntry exfat_entry;
 };
 
 /// True when `n` is a real resolved node (backend != Invalid).

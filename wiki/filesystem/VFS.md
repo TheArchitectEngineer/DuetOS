@@ -80,7 +80,7 @@ WRITE / STAT` stay generic. It:
 | ramfs | `kernel/fs/ramfs.{h,cpp}` | Read-only constinit tree + mutable `/proc` snapshots |
 | tmpfs | `kernel/fs/tmpfs.{h,cpp}` | Writable flat `/tmp` (16 slots × 512 B) |
 | FAT32 | `kernel/fs/fat32.{h,cpp}` + `fat32_*.cpp` | Read + write (in-place / append / create / delete / rename); LFN-validated |
-| exFAT | `kernel/fs/exfat.{h,cpp}` + `exfat_rust/` | Read + bounded root-dir write (in-place / append / create / truncate); first-cluster enumeration |
+| exFAT | `kernel/fs/exfat.{h,cpp}` + `exfat_rust/` | Read + bounded root-dir write (in-place / append / create / truncate); first-cluster enumeration. VFS-mounted read-only at `/disk/exfat<N>`, root dir only |
 | ext4 | `kernel/fs/ext4.{h,cpp}` + `ext4_rust/` | Read-only; dir + file extents walked every depth (file reads capped at depth 16); multi-component path resolve |
 | NTFS | `kernel/fs/ntfs.{h,cpp}` + `ntfs_rust/` | Read-only; USA fixup + $I30 enum + resident/single-run $DATA reads; multi-component path resolve (resident $INDEX_ROOT only) |
 | DuetFS | `kernel/fs/duetfs.{h,cpp}` + `duetfs/` | Native Rust FS; v8, per-block CRCs, symlinks, hard links, journal/crypto/snapshots (dormant on live path) |

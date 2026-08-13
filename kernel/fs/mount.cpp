@@ -2,6 +2,7 @@
 
 #include "core/panic.h"
 #include "fs/duetfs.h"
+#include "fs/exfat.h"
 #include "fs/ext4.h"
 #include "fs/fat32.h"
 #include "fs/ntfs.h"
@@ -76,6 +77,8 @@ const char* FsTypeName(FsType t)
         return "duetfs";
     case FsType::RamVol:
         return "ramvol";
+    case FsType::Exfat:
+        return "exfat";
     }
     return "unknown";
 }
@@ -289,6 +292,93 @@ bool Fat32Lookup(u32 block_handle, const char* subpath, void* out_node)
 }
 
 constinit VfsBackendOps g_fat32_ops = {&Fat32Lookup};
+
+// exFAT read-only backend. `block_handle` here is the exFAT VOLUME
+// INDEX **plus one** (in spirit, mirrors FAT32's `Fat32Lookup`: the
+// registry index, not the raw block-layer handle, drives the lookup —
+// see `fat32::Fat32Volume`). The `+1` is NOT something FAT32 needs to
+// do, and FAT32's own boot auto-mount loop (`boot_bringup.cpp`) has
+// the exact hazard this works around: `VfsMount` rejects a literal
+// `block_handle == 0` for every non-Ram backend (see `VfsMount`
+// above), which collides with registry index 0 — the always-present
+// first volume. Encoding the mount handle as `index + 1` gives 0 an
+// unambiguous meaning ("no handle") and keeps index 0 mountable; this
+// function is the one place that knows about the offset — everywhere
+// else (`VfsNode::exfat_volume_idx`, `ExfatVolumeByIndex`, the
+// selftest, shell_fsio.cpp) deals in the true, un-offset registry
+// index. See the auto-mount loop in boot_bringup.cpp, which passes
+// `i + 1`. Only the root directory is addressable — exFAT has no
+// subdirectory recursion yet (fs/exfat.h header GAP), so a subpath
+// naming anything past the bare mount point or a single root-dir
+// entry is a miss. The bare mount point resolves to a synthetic
+// root-directory DirEntry, mirroring Fat32LookupPath's synthetic root
+// (fs/fat32_lookup.cpp).
+bool ExfatLookup(u32 block_handle, const char* subpath, void* out_node)
+{
+    if (subpath == nullptr || out_node == nullptr || block_handle == 0)
+    {
+        return false;
+    }
+    const u32 vol_idx = block_handle - 1;
+    const exfat::Volume* v = exfat::ExfatVolumeByIndex(vol_idx);
+    if (v == nullptr)
+    {
+        return false;
+    }
+    auto* out = static_cast<VfsNode*>(out_node);
+
+    const char* p = subpath;
+    while (*p == '/')
+    {
+        ++p;
+    }
+    if (*p == '\0')
+    {
+        // Bare mount point — synthetic root directory (no on-disk
+        // dirent backs the root itself, same as FAT32's synthetic root).
+        exfat::DirEntry root{};
+        root.name[0] = '\0';
+        root.attributes = 0x10; // FAT-style DIR bit
+        root.first_cluster = v->first_cluster_of_root;
+        root.valid_data_len = 0;
+        root.size_bytes = 0;
+        out->backend = VfsBackend::Exfat;
+        out->ramfs = nullptr;
+        out->exfat_volume_idx = vol_idx;
+        out->exfat_entry = root;
+        return true;
+    }
+
+    // Single root-dir component only. A second '/' means the caller is
+    // asking for something inside a subdirectory, or the component
+    // overran the name buffer — either way, unsupported: miss rather
+    // than mis-resolve.
+    char comp[128];
+    u32 ci = 0;
+    while (p[ci] != '\0' && p[ci] != '/' && ci + 1 < sizeof(comp))
+    {
+        comp[ci] = p[ci];
+        ++ci;
+    }
+    if (p[ci] != '\0')
+    {
+        return false;
+    }
+    comp[ci] = '\0';
+
+    const exfat::DirEntry* e = exfat::ExfatFindInRoot(v, comp);
+    if (e == nullptr)
+    {
+        return false;
+    }
+    out->backend = VfsBackend::Exfat;
+    out->ramfs = nullptr;
+    out->exfat_volume_idx = vol_idx;
+    out->exfat_entry = *e;
+    return true;
+}
+
+constinit VfsBackendOps g_exfat_ops = {&ExfatLookup};
 
 bool DuetFsLookup(u32 block_handle, const char* subpath, void* out_node)
 {
@@ -639,16 +729,16 @@ const VfsBackendOps* VfsBackendForFsType(FsType t)
         // on NtfsLookup). The read path proper is exercised by
         // NtfsSelfTest on every boot.
         return &g_ntfs_ops;
+    case FsType::Exfat:
+        // Read-only backend: root directory only (no subdirectory
+        // recursion — see fs/exfat.h header GAP). The mutation API
+        // (ExfatWriteInPlace / ExfatAppendInRoot / ExfatCreateInRoot /
+        // ExfatTruncateInRoot) exists in fs/exfat.cpp but is deliberately
+        // NOT reachable through this vtable — VfsBackendLookupFn has no
+        // write arm, and this slice only exposes reads.
+        return &g_exfat_ops;
     case FsType::Ramfs:
     default:
-        // GAP: exFAT — the read lookup + the file-mutation API
-        // (ExfatWriteInPlace / ExfatAppendInRoot / ExfatCreateInRoot /
-        // ExfatTruncateInRoot in fs/exfat.cpp) are live and reachable
-        // through the exfat:: registry, but exFAT has no `FsType`
-        // member yet, so it cannot be VfsMount'd / dispatched here.
-        // Revisit when an `FsType::Exfat` lands in fs/mount.h: add the
-        // enum member + an `ExfatLookup` arm beside g_fat32_ops, the
-        // same way FAT32 routes its VfsNode through the volume index.
         return nullptr;
     }
 }

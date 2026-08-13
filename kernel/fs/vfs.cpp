@@ -501,6 +501,10 @@ bool VfsNodeIsDir(const VfsNode& n)
     {
         return n.ntfs_is_dir;
     }
+    if (n.backend == VfsBackend::Exfat)
+    {
+        return (n.exfat_entry.attributes & 0x10) != 0;
+    }
     return false;
 }
 
@@ -531,6 +535,10 @@ bool VfsNodeIsFile(const VfsNode& n)
     {
         return !n.ntfs_is_dir;
     }
+    if (n.backend == VfsBackend::Exfat)
+    {
+        return (n.exfat_entry.attributes & 0x10) == 0;
+    }
     return false;
 }
 
@@ -560,6 +568,10 @@ u64 VfsNodeSize(const VfsNode& n)
     if (n.backend == VfsBackend::Ntfs)
     {
         return n.ntfs_is_dir ? 0 : n.ntfs_size_bytes;
+    }
+    if (n.backend == VfsBackend::Exfat)
+    {
+        return n.exfat_entry.size_bytes;
     }
     return 0;
 }

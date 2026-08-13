@@ -14,6 +14,7 @@
 #include "drivers/storage/block.h"
 #include "fs/exfat_rust/include/exfat_rust.h"
 #include "log/klog.h"
+#include "sched/sched.h"
 #include "util/unicode.h"
 
 namespace duetos::fs::exfat
@@ -296,6 +297,63 @@ inline constexpr u32 kMaxChainClusters = 65536;
 // g_dir_scratch so a write that nests inside a snapshot refresh
 // can't clobber a buffer the refresh is mid-read on.
 alignas(16) constinit u8 g_write_scratch[4096] = {};
+
+// Driver-wide mutex protecting g_write_scratch (and everything reached
+// through it: ReadFatEntry / WriteFatEntry / FindAllocationBitmap /
+// the dirent-set planting helpers below, plus the public ExfatReadAt /
+// ExfatWriteInPlace / ExfatAppendInRoot / ExfatCreateInRoot /
+// ExfatTruncateInRoot entry points). Now that exFAT is wired into the
+// VFS (VfsBackend::Exfat), ExfatReadAt is reachable from multiple
+// concurrent ring-3 tasks doing ordinary file reads — without this,
+// two concurrent readers (or a reader racing the mutation API) would
+// stomp on the same 4 KiB buffer mid block-IO. Mirrors
+// fs/fat32.cpp::g_fat32_mutex / Fat32Guard exactly: a sched::Mutex
+// (sleep-capable, since BlockDeviceRead/Write can block) rather than a
+// spinlock, recursive re-entry for the nested-call chains inside the
+// write path (ExfatAppendInRoot/CreateInRoot/TruncateInRoot all call
+// ExfatWriteInPlace internally), and a pre-scheduler bypass since
+// ExfatScanAll/ExfatProbe can run before the scheduler is online.
+constinit sched::Mutex g_exfat_mutex = {.owner = nullptr, .waiters = {}, .class_id = duetos::sync::kLockClassExfat};
+
+// RAII recursive lock around every public exFAT entry that touches
+// g_write_scratch. See g_exfat_mutex above.
+class ExfatGuard
+{
+  public:
+    ExfatGuard()
+    {
+        sched::Task* me = sched::CurrentTask();
+        if (me != nullptr && g_exfat_mutex.owner == me)
+        {
+            // Recursive re-entry (e.g. ExfatAppendInRoot -> ExfatWriteInPlace):
+            // the owning task already holds the mutex. Skip re-locking;
+            // the destructor must NOT unlock (owns_ stays false) so the
+            // outermost guard owns the unlock.
+            owns_ = false;
+            return;
+        }
+        if (me == nullptr)
+        {
+            // Pre-scheduler (ExfatProbe/ExfatScanAll can run before the
+            // scheduler is online): no preemption is possible yet, so
+            // the race this guard exists for can't fire.
+            owns_ = false;
+            return;
+        }
+        sched::MutexLock(&g_exfat_mutex);
+        owns_ = true;
+    }
+    ~ExfatGuard()
+    {
+        if (owns_)
+            sched::MutexUnlock(&g_exfat_mutex);
+    }
+    ExfatGuard(const ExfatGuard&) = delete;
+    ExfatGuard& operator=(const ExfatGuard&) = delete;
+
+  private:
+    bool owns_ = false;
+};
 
 inline u32 BytesPerSector(const Volume& v)
 {
@@ -967,6 +1025,88 @@ const DirEntry* ExfatFindInRoot(const Volume* v, const char* name)
     return nullptr;
 }
 
+void ExfatRefreshVolume(u32 index)
+{
+    if (index >= g_volume_count)
+        return;
+    RefreshRootSnapshot(g_volumes[index]);
+}
+
+i64 ExfatReadAt(const Volume* v, const DirEntry* e, u64 offset, void* out, u64 len)
+{
+    if (v == nullptr || e == nullptr || out == nullptr)
+        return -1;
+    if (offset >= e->size_bytes || len == 0)
+        return 0;
+    // Clamp to the file's logical size — a caller asking for more than
+    // is left just gets what's there, mirroring Fat32ReadAt's EOF clamp.
+    const u64 avail = e->size_bytes - offset;
+    if (len > avail)
+        len = avail;
+    // A genuinely empty file (size_bytes == 0) already returned 0 above
+    // (offset(0) >= size_bytes(0)). Reaching here with first_cluster < 2
+    // means the dirent claims a NONZERO size but has no valid data
+    // cluster to back it — corrupt/adversarial metadata, not EOF. Fail
+    // closed rather than returning 0, which would read to a caller
+    // exactly like a legitimate empty/EOF read.
+    if (e->first_cluster < 2)
+        return -1;
+
+    const u32 bps = BytesPerSector(*v);
+    const u64 cb = ClusterBytes(*v);
+    if (bps == 0 || bps > sizeof(g_write_scratch) || cb == 0)
+        return -1;
+    auto* dst = static_cast<u8*>(out);
+
+    ExfatGuard guard;
+
+    // Walk to the cluster holding `offset`.
+    u32 cluster = e->first_cluster;
+    const u64 skip = offset / cb;
+    for (u64 i = 0; i < skip; ++i)
+    {
+        u32 next = 0;
+        if (!ReadFatEntry(*v, cluster, &next) || next < 2 || next >= kExfatBadCluster)
+            return -1;
+        cluster = next;
+    }
+
+    // Sector-granular reads so any cluster size works.
+    u64 got = 0;
+    u64 pos = offset;
+    while (got < len)
+    {
+        const u64 in_cluster = pos % cb;
+        const u32 sec_in_cluster = u32(in_cluster / bps);
+        const u32 in_sec = u32(in_cluster % bps);
+        const u64 lba = ClusterToLba(*v, cluster) + sec_in_cluster;
+        const u64 chunk = (bps - in_sec) < (len - got) ? (bps - in_sec) : (len - got);
+        if (drivers::storage::BlockDeviceRead(v->block_handle, lba, 1, g_write_scratch) != 0)
+            return got > 0 ? i64(got) : -1;
+        for (u64 i = 0; i < chunk; ++i)
+            dst[got + i] = g_write_scratch[in_sec + i];
+        got += chunk;
+        pos += chunk;
+        if (got < len && (pos % cb) == 0)
+        {
+            u32 next = 0;
+            if (!ReadFatEntry(*v, cluster, &next) || next < 2 || next >= kExfatBadCluster)
+            {
+                // The chain ended (or broke) before delivering the bytes
+                // `size_bytes` promised for this offset/len span — the
+                // on-disk chain is shorter than the dirent claims. That's
+                // truncated/corrupt metadata, not end-of-file (EOF was
+                // already ruled out by the `avail` clamp above). Fail
+                // closed instead of returning `got`, which would look
+                // exactly like a legitimate short read.
+                return -1;
+            }
+            cluster = next;
+        }
+    }
+    return i64(got);
+}
+
 i64 ExfatWriteInPlace(const Volume* v, const DirEntry* e, u64 offset, const void* buf, u64 len)
 {
     if (v == nullptr || e == nullptr || buf == nullptr)
@@ -979,6 +1119,8 @@ i64 ExfatWriteInPlace(const Volume* v, const DirEntry* e, u64 offset, const void
         return -1; // in-place only — no growth
     if (e->first_cluster < 2)
         return -1;
+
+    ExfatGuard guard;
 
     const u32 bps = BytesPerSector(*v);
     const u64 cb = ClusterBytes(*v);
@@ -1039,6 +1181,8 @@ i64 ExfatAppendInRoot(Volume* v, const char* name, const void* buf, u64 len)
     if (len == 0)
         return 0;
 
+    ExfatGuard guard;
+
     SlotLoc loc{};
     if (!FindDirentSet(*v, name, &loc))
         return -1;
@@ -1091,6 +1235,9 @@ i64 ExfatCreateInRoot(Volume* v, const char* name, const void* buf, u64 len)
         return -1;
     if (!drivers::storage::BlockDeviceIsWritable(v->block_handle))
         return -1;
+
+    ExfatGuard guard;
+
     if (ExfatFindInRoot(v, name) != nullptr)
         return -1; // duplicate
 
@@ -1147,6 +1294,8 @@ i64 ExfatTruncateInRoot(Volume* v, const char* name, u64 new_size)
         return -1;
     if (!drivers::storage::BlockDeviceIsWritable(v->block_handle))
         return -1;
+
+    ExfatGuard guard;
 
     SlotLoc loc{};
     if (!FindDirentSet(*v, name, &loc))

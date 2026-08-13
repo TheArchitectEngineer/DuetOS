@@ -655,6 +655,7 @@ void LockdepRegisterCanonicalClasses()
     // permits acquiring a Spin lock while one is held but not the
     // reverse.
     LockdepRegisterClass(kLockClassFat32, "fat32", LockKind::Sleep);
+    LockdepRegisterClass(kLockClassExfat, "exfat", LockKind::Sleep);
     LockdepRegisterClass(kLockClassCompositor, "compositor", LockKind::Sleep);
 }
 

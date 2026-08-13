@@ -35,7 +35,7 @@ serves this path." Once a backend is in the table, every consumer
 kMaxMounts = 16    fixed-size flat array, linear scan add / lookup
 struct MountEntry {
     char     mount_point[64];   canonical absolute path
-    FsType   fs_type;           Ramfs | Fat32 | Ext4 | Ntfs | DuetFs | RamVol
+    FsType   fs_type;           Ramfs | Fat32 | Ext4 | Ntfs | DuetFs | RamVol | Exfat
     u32      block_handle;      0 for ramfs / synth volumes
     u32      mount_seq;         monotonic id, ever-incrementing
     bool     in_use;
@@ -93,6 +93,7 @@ Today's wiring:
 | Ntfs          | Yes — `g_ntfs_ops` → `NtfsLookup` (runs real resolution; returns false) |
 | DuetFs        | Yes                             |
 | RamVol        | Yes                             |
+| Exfat         | Yes — `g_exfat_ops` → `ExfatLookup` (read-only, root dir only; no write arm) |
 
 `VfsBackendForFsType` returns nullptr only for types with no
 registered ops; for those `VfsResolve` falls back to the ramfs root

@@ -2883,6 +2883,33 @@ void BootBringupDevices(bool force_net_smoke)
     duetos::fs::exfat::ExfatScanAll();
     SerialWrite("[bringup-tail] exfat-scan done\n");
 
+    // Auto-register every probed exFAT volume in the mount registry, at
+    // "/disk/exfat<idx>" so it can't collide with the FAT32 "/disk/<idx>"
+    // mounts above. Read-only tier — see fs/exfat.h / fs/mount.cpp
+    // (VfsBackend::Exfat has no write arm). ExfatScanAll (just above)
+    // already ran the ownership gate: ExfatProbe only adds a volume to
+    // the registry ExfatVolumeByIndex serves when it carries the
+    // DuetOS-ownership marker (ExfatVolumeIsDuetOsOwned); a foreign
+    // exFAT volume never reaches ExfatVolumeCount(), so this loop mounts
+    // strictly the subset of probed volumes the ownership registry has
+    // already admitted — it does not re-check or relax that gate.
+    //
+    // `VfsMount` rejects a literal `block_handle == 0` for every
+    // non-Ram backend, which would silently drop the always-present
+    // first exFAT volume (registry index 0) — `ExfatLookup` (fs/mount.cpp)
+    // decodes the mount handle back to the true index, so the +1 here
+    // must match.
+    {
+        char mp[24] = "/disk/exfat0";
+        for (duetos::u32 i = 0; i < duetos::fs::exfat::ExfatVolumeCount() && i < 10; ++i)
+        {
+            mp[11] = static_cast<char>('0' + i);
+            mp[12] = '\0';
+            (void)duetos::fs::VfsMount(mp, duetos::fs::FsType::Exfat, i + 1);
+        }
+    }
+    SerialWrite("[bringup-tail] exfat-automount done\n");
+
     // Steady-state begins here. Arm the heartbeat-cadence fix-journal
     // persist now — deferring it past the boot self-test storm avoids
     // a measured ~1 s full-core CPU spike from repeated KERNEL.FIX

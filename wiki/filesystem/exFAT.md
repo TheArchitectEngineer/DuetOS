@@ -6,7 +6,8 @@
 > at probe time
 >
 > **Maturity:** Read + bounded root-directory write (in-place / append /
-> create / truncate); subdirectory recursion deferred
+> create / truncate); subdirectory recursion deferred. VFS-mounted
+> read-only at `/disk/exfat<N>` for volumes the ownership gate admits.
 
 ## Overview
 
@@ -71,7 +72,9 @@ boot sector first and dispatch by signature.
 | `ExfatVolumeCount()`        | Live volume count.                                                          |
 | `ExfatVolumeByIndex(i)`     | Stable pointer to the `Volume` record for inspection.                       |
 | `ExfatScanAll()`            | Iterate every registered block handle and call `ExfatProbe`.               |
+| `ExfatRefreshVolume(index)` | Re-walk the root directory for registry slot `index` in place. Needed after mutating a volume through a caller-owned working copy (the mutation API takes `Volume*`, but `ExfatVolumeByIndex` only hands out `const Volume*`) — resyncs the registry's own cached listing before a reader (e.g. the VFS path) goes through it. |
 | `ExfatFindInRoot(v, name)`  | Look up a root entry by name; returns the cached `DirEntry` or nullptr.     |
+| `ExfatReadAt(v, e, off, out, len)` | Offset-aware read-only access (mirrors `fat32::Fat32ReadAt`); the VFS read-dispatch entry point. Fails closed (-1) on corrupt metadata — nonzero size with no valid first cluster, or a FAT chain that ends before `size_bytes` is satisfied — rather than returning something that looks like EOF or a short read. |
 | `ExfatWriteInPlace(...)`    | Write `len` bytes at `offset` within an existing root file (FAT chain walk + flush). |
 | `ExfatAppendInRoot(...)`    | Append to a root file, extending the FAT chain, then flush.                 |
 | `ExfatCreateInRoot(...)`    | Create a new root file from a byte buffer, then flush.                      |
@@ -79,7 +82,11 @@ boot sector first and dispatch by signature.
 
 All write paths refuse a read-only device (`BlockDeviceIsWritable`)
 and route a `BlockDeviceFlush` through to non-volatile media on
-success.
+success. `ExfatReadAt` and the write path share a block-IO scratch
+buffer (`g_write_scratch`) serialised by `g_exfat_mutex` /
+`ExfatGuard` (`fs/exfat.cpp`) — a direct mirror of FAT32's
+`g_fat32_mutex` / `Fat32Guard` — since exFAT reads are now reachable
+from concurrent VFS callers.
 
 ## Directory Entry Shape
 
@@ -110,7 +117,9 @@ clear.
   SD card.
 - **No subdirectory recursion.** Only the root is walked / written;
   opening a subdirectory is a future slice. All write APIs are
-  `…InRoot`.
+  `…InRoot`. The VFS lookup (`ExfatLookup` in `fs/mount.cpp`) inherits
+  the same limit: a path with more than one component past the mount
+  point is a miss, not a mis-resolve.
 - **Dirent-set GAPs.** `exfat.cpp:772` — a dirent set that straddles
   a sector boundary is not produced by the walker (the read path
   assumes the set lives within one buffered sector). `exfat.cpp:826`
@@ -122,11 +131,24 @@ clear.
 ## Threading & Locking Model
 
 All ops run in process context, polling-synchronous, and do not
-sleep across DMA. The read/write paths share two file-static
-scratch buffers (`g_scratch`, `g_dir_scratch` in `exfat.cpp`), so
-the surface is **not reentrant** — two concurrent operations on a
-volume would clobber each other's buffer. Today the only callers
-are single-threaded; an SMP workload would need a per-volume lock.
+sleep across DMA. The read/write paths share three file-static
+scratch buffers: `g_scratch` (boot-sector probe only),
+`g_dir_scratch` (root-directory walk, used by probe and by the
+post-mutation snapshot refresh), and `g_write_scratch` (everything
+else — `ExfatReadAt` and the whole mutation API). `g_write_scratch`
+is serialised by `g_exfat_mutex` / the `ExfatGuard` RAII lock
+(`fs/exfat.cpp`) — a direct mirror of `fs/fat32.cpp`'s
+`g_fat32_mutex` / `Fat32Guard`: a sleep-capable `sched::Mutex`
+(class `kLockClassExfat`), recursive re-entry (the write path's
+internal nested calls, e.g. `ExfatAppendInRoot` → `ExfatWriteInPlace`),
+and a pre-scheduler bypass for `ExfatProbe`/`ExfatScanAll`, which run
+before the scheduler is online. This was added once `VfsBackend::Exfat`
+made `ExfatReadAt` reachable from concurrent ring-3 readers; before
+that, exFAT's only caller was the single-threaded boot self-test.
+`g_scratch` and `g_dir_scratch` are NOT guarded — both are still only
+touched from single-threaded boot-time contexts (`ExfatProbe` /
+`ExfatScanAll` / `ExfatRefreshVolume`), none of which run concurrently
+with each other today.
 
 ## Capability / Privilege Surface
 
@@ -146,8 +168,9 @@ strings, and triad ordering.
 ## Related Pages
 
 - [FAT32](FAT32.md) — sibling backend for ≤ 32 GiB volumes.
-- [VFS](VFS.md) — mount integration (today exFAT volumes appear in
-  the volume registry but are not in the per-FsType lookup vtable).
-- [Mount Registry](Mount-Registry.md) — where future exFAT mounts
-  would land.
+- [VFS](VFS.md) — `VfsBackend::Exfat` is wired into the per-FsType
+  lookup vtable; reads dispatch through `ExfatReadAt`, root dir only.
+- [Mount Registry](Mount-Registry.md) — `FsType::Exfat` volumes
+  auto-mount at `/disk/exfat<N>` (read-only) once the boot-tail
+  `ExfatScanAll` probe admits them.
 - [GPT](GPT.md) — partition discovery feeds the probe path.

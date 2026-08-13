@@ -22,6 +22,9 @@
 #include "arch/x86_64/serial.h"
 #include "debug/probes.h"
 #include "drivers/storage/block.h"
+#include "fs/mount.h"
+#include "fs/ramfs.h"
+#include "fs/vfs.h"
 #include "log/klog.h"
 
 namespace duetos::fs::exfat
@@ -378,8 +381,151 @@ void ExfatSelfTest()
         }
     }
 
-    SerialWrite(
-        "[exfat-selftest] PASS (synthetic volume: foreign-reject+create+find+write+append+truncate verified)\n");
+    // Phases 1-5 drove CRUD on `vol`, a stack copy of the probed
+    // volume (the mutation API needs a non-const `Volume*`, and
+    // `ExfatVolumeByIndex` only ever hands out `const Volume*` — see
+    // the file-header comment). That means the REGISTRY's own cached
+    // root-dir snapshot (`g_volumes[probed.value()]`, what
+    // `ExfatVolumeByIndex` actually returns) never saw HELLO.TXT get
+    // created/written/appended/truncated — only `vol`'s cache did.
+    // Phase 6 below resolves through the real VFS path, which reads
+    // the registry, not `vol` — without this resync it would
+    // legitimately miss HELLO.TXT even though every CRUD phase above
+    // passed. Sync the registry's cache from the same on-disk state
+    // the CRUD phases just wrote before exercising that path.
+    ExfatRefreshVolume(probed.value());
+
+    // ---- Phase 6: VFS integration. Mount the synthetic volume and
+    // prove VfsResolve surfaces an exFAT-tagged node the predicates +
+    // read-dispatch path agree on — the wire-in that makes a path
+    // under an exFAT mount (`cat /disk/exfat<N>/HELLO.TXT`) reach this
+    // backend read-only. Mirrors the NTFS self-test's Phase 7
+    // (ntfs_selftest.cpp). `probed.value()` is the volume REGISTRY
+    // INDEX (not the raw block handle) — ExfatLookup indexes via
+    // ExfatVolumeByIndex, the same convention FAT32 uses.
+    //
+    // This self-test is the first exFAT probe of the boot sequence
+    // (ExfatScanAll's real-disk scan runs later, in boot_bringup.cpp),
+    // so `probed.value()` MUST be registry index 0 — deliberately
+    // asserted rather than assumed, because index 0 is exactly the
+    // value `VfsMount` rejects for every non-Ram backend
+    // (`block_handle == 0`). `ExfatLookup` (fs/mount.cpp) decodes the
+    // mount handle back to the true index via `index + 1`; the +1
+    // here must match, and this assertion is what guarantees the test
+    // actually exercises that first-volume edge instead of silently
+    // drifting to a later index that would mask the bug.
+    if (probed.value() != 0)
+    {
+        Fail("vfs-mount-not-first-volume");
+        return;
+    }
+    const MountId mid = VfsMount("/mnt/exfat-selftest", FsType::Exfat, probed.value() + 1);
+    if (mid == kInvalidMountId)
+    {
+        Fail("vfs-mount");
+        return;
+    }
+    // Mount point itself resolves to the synthetic root directory.
+    const VfsNode rootnode = VfsResolve(RamfsTrustedRoot(), "/mnt/exfat-selftest", 64);
+    if (rootnode.backend != VfsBackend::Exfat || !VfsNodeIsDir(rootnode) || VfsNodeIsFile(rootnode))
+    {
+        Fail("vfs-resolve-root");
+        return;
+    }
+    const char kVfsPath[] = "/mnt/exfat-selftest/HELLO.TXT";
+    const VfsNode node = VfsResolve(RamfsTrustedRoot(), kVfsPath, 64);
+    if (node.backend != VfsBackend::Exfat || !VfsNodeIsFile(node) || VfsNodeIsDir(node))
+    {
+        Fail("vfs-resolve");
+        return;
+    }
+    if (VfsNodeSize(node) != 7 || node.exfat_volume_idx != probed.value())
+    {
+        Fail("vfs-node-fields");
+        return;
+    }
+    // Read through the node exactly as the shell read path does
+    // (ExfatVolumeByIndex -> ExfatReadAt) and compare.
+    const Volume* vvol = ExfatVolumeByIndex(node.exfat_volume_idx);
+    u8 vbuf[7];
+    const i64 vread = (vvol != nullptr) ? ExfatReadAt(vvol, &node.exfat_entry, 0, vbuf, sizeof(vbuf)) : -1;
+    if (vread != i64(sizeof(vbuf)) || vbuf[0] != 'H' || vbuf[5] != ' ' || vbuf[6] != 'f')
+    {
+        Fail("vfs-read");
+        return;
+    }
+    // A partial read (offset > 0) must clamp to the remaining bytes.
+    u8 pbuf[4] = {};
+    const i64 pread = (vvol != nullptr) ? ExfatReadAt(vvol, &node.exfat_entry, 5, pbuf, sizeof(pbuf)) : -1;
+    if (pread != 2 || pbuf[0] != ' ' || pbuf[1] != 'f')
+    {
+        Fail("vfs-partial-read");
+        return;
+    }
+    // A path that obviously doesn't exist under the mount must miss.
+    const VfsNode miss = VfsResolve(RamfsTrustedRoot(), "/mnt/exfat-selftest/_NOPE_.X", 64);
+    if (VfsNodeIsValid(miss) || miss.backend != VfsBackend::Invalid)
+    {
+        Fail("vfs-miss");
+        return;
+    }
+    // A path reaching past the root (subdirectory descent) is
+    // unsupported by design (fs/exfat.h header GAP) and must also miss
+    // rather than mis-resolve.
+    const VfsNode deep = VfsResolve(RamfsTrustedRoot(), "/mnt/exfat-selftest/SUB/FILE.TXT", 64);
+    if (VfsNodeIsValid(deep) || deep.backend != VfsBackend::Invalid)
+    {
+        Fail("vfs-subdir-miss");
+        return;
+    }
+    if (!VfsUmount(mid))
+    {
+        Fail("vfs-umount");
+        return;
+    }
+
+    // ---- Phase 7: fail-closed regression for corrupt/adversarial
+    // metadata. `ExfatReadAt` must never let a nonempty file with no
+    // valid data cluster, or a FAT chain that ends before the dirent's
+    // claimed size is satisfied, look like a legitimate EOF / short
+    // read — both must return -1. These DirEntry values are hand-built
+    // (not produced by the write path), so they exercise the read
+    // path's own defenses independent of whether the write path could
+    // ever produce them.
+    {
+        // (a) Nonzero size, but first_cluster < 2 — no data to walk.
+        DirEntry bad_cluster{};
+        bad_cluster.first_cluster = 0;
+        bad_cluster.size_bytes = 8;
+        bad_cluster.valid_data_len = 8;
+        u8 buf[8];
+        if (ExfatReadAt(vvol, &bad_cluster, 0, buf, sizeof(buf)) != -1)
+        {
+            Fail("readat-bad-cluster-not-closed");
+            return;
+        }
+
+        // (b) first_cluster is valid, but its FAT chain is a single
+        // cluster (kRootCluster's chain is EOC-terminated by
+        // BuildSyntheticVolume) while size_bytes claims two clusters'
+        // worth. A read spanning the cluster boundary must fail closed
+        // when the chain walk hits EOC instead of a next cluster,
+        // rather than silently truncating to a "successful" short read.
+        DirEntry truncated_chain{};
+        truncated_chain.first_cluster = kRootCluster;
+        truncated_chain.size_bytes = u64(kBytesPerSector) * 2;
+        truncated_chain.valid_data_len = truncated_chain.size_bytes;
+        u8 buf2[64];
+        const u64 near_boundary = u64(kBytesPerSector) - 32;
+        if (ExfatReadAt(vvol, &truncated_chain, near_boundary, buf2, sizeof(buf2)) != -1)
+        {
+            Fail("readat-broken-chain-not-closed");
+            return;
+        }
+    }
+
+    SerialWrite("[exfat-selftest] PASS (synthetic volume: "
+                "foreign-reject+create+find+write+append+truncate+vfs+fail-closed verified)\n");
 }
 
 } // namespace duetos::fs::exfat

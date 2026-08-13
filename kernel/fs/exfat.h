@@ -33,6 +33,10 @@
  *     bits, then plant / patch the File (0x85) + Stream-Extension
  *     (0xC0) + FileName (0xC1) dirent set with a correct
  *     SetChecksum and NameHash.
+ *   - Offset-aware root-directory file read (ExfatReadAt), mirroring
+ *     fat32::Fat32ReadAt. This is the read-dispatch entry point the
+ *     VFS mount tier (VfsBackend::Exfat, fs/vfs.h) drives; a volume
+ *     only reaches that tier if it passed the ownership gate below.
  *
  * Not in scope (precise GAPs annotated at the call sites):
  *   - Subdirectory targets — create/append/truncate operate on
@@ -122,6 +126,19 @@ u32 ExfatVolumeCount();
 const Volume* ExfatVolumeByIndex(u32 index);
 void ExfatScanAll();
 
+/// Re-walk the root directory for the registry volume at `index`,
+/// refreshing ITS cached `root_entries` from disk. No-op if `index` is
+/// out of range. The mutation API (below) takes a non-const `Volume*`
+/// and refreshes whatever Volume instance the caller passed in — but
+/// `ExfatVolumeByIndex` only ever hands out a `const Volume*`, so a
+/// caller that mutates through its own working copy (e.g. a stack copy
+/// of a probed volume) leaves the REGISTRY's own snapshot stale. Call
+/// this after such a mutation, before any reader goes through the
+/// registry (`ExfatVolumeByIndex` / the VFS `VfsBackend::Exfat` path),
+/// so it observes the change. See `ExfatSelfTest`, which mutates a
+/// stack copy and then exercises the real VFS resolve path.
+void ExfatRefreshVolume(u32 index);
+
 // ---------------------------------------------------------------
 // Write path (root directory only — see header GAP list). All take
 // a non-const Volume* because a successful create/append/truncate
@@ -136,6 +153,26 @@ void ExfatScanAll();
 /// miss. Pointer is into the volume's snapshot — stable until the
 /// next mutating call refreshes it.
 const DirEntry* ExfatFindInRoot(const Volume* v, const char* name);
+
+/// Offset-aware read-only access, mirroring `fat32::Fat32ReadAt`. Reads
+/// up to `len` bytes starting at byte `offset` in `e`'s data into `out`.
+/// Walks the FAT chain to skip past `offset`, then reads sector-by-
+/// sector, clamped to `e->size_bytes`. Returns the number of bytes
+/// copied, 0 only at a genuine EOF (`offset >= e->size_bytes`), or -1
+/// on a bad argument, I/O error, OR corrupt/truncated metadata —
+/// `e->size_bytes` is nonzero but `e->first_cluster` has no valid data
+/// cluster, or the FAT chain ends (EOC / bad cluster) before as many
+/// bytes as `size_bytes` promises for the requested span have been
+/// delivered. Both are fail-closed by design: neither is allowed to
+/// return 0 or a partial byte count, which would read to a caller
+/// exactly like a legitimate EOF or short read instead of the
+/// inconsistent on-disk state it actually is. Read-only — does not
+/// require `BlockDeviceIsWritable` and never mutates the volume. This
+/// is the VFS read-dispatch entry point (see `VfsBackend::Exfat` in
+/// fs/vfs.h); it does not gate on ownership itself because only
+/// DuetOS-owned volumes ever reach the registry `ExfatVolumeByIndex`
+/// serves (see `ExfatVolumeIsDuetOsOwned`).
+i64 ExfatReadAt(const Volume* v, const DirEntry* e, u64 offset, void* out, u64 len);
 
 /// Overwrite `len` bytes at byte offset `offset` inside `e`. NO
 /// size change, NO allocation — `offset + len` MUST be <=

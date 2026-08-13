@@ -13,6 +13,7 @@
 #include "shell/shell_internal.h"
 
 #include "fs/duetfs.h"
+#include "fs/exfat.h"
 #include "fs/ext4.h"
 #include "fs/fat32.h"
 #include "fs/ntfs.h"
@@ -148,6 +149,25 @@ u32 ReadFileToBuf(const char* path, char* buf, u32 cap)
         }
         duetos::u64 got = 0;
         if (!ntfs::NtfsReadFile(*vol, rec, data, 0, buf, cap, &got))
+        {
+            return static_cast<u32>(-1);
+        }
+        return static_cast<u32>(got);
+    }
+    if (v.backend == VfsBackend::Exfat)
+    {
+        // exFAT read-only: the VfsNode already carries a snapshotted
+        // root-dir DirEntry (re-resolved on every VfsResolve call), so
+        // no re-derivation step is needed — just stream through the FAT
+        // chain via ExfatReadAt clamped to `cap`.
+        namespace exf = duetos::fs::exfat;
+        const exf::Volume* vol = exf::ExfatVolumeByIndex(v.exfat_volume_idx);
+        if (vol == nullptr)
+        {
+            return static_cast<u32>(-1);
+        }
+        const i64 got = exf::ExfatReadAt(vol, &v.exfat_entry, 0, buf, cap);
+        if (got < 0)
         {
             return static_cast<u32>(-1);
         }
