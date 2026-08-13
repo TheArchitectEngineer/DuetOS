@@ -467,7 +467,7 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: Correct SYS_THREAD_OPEN fixture number and synchronize TID-only handle contract
 - **Claimed**: 2026-07-27T06:51:16Z
 - **Status**: COMPLETED @ 2026-07-27T06:52:05Z
-### 🟢 linux-mm-wx-hardening
+### [ACTIVE] linux-mm-wx-hardening
 - **Session**: `Nathan-8`
 - **Branch**: `claude/linux-mmap-wx-hardening`
 - **Files**: `kernel/subsystems/linux/syscall_mm.cpp kernel/subsystems/linux/mm_protection_policy.h kernel/subsystems/linux/extra_syscalls.cpp kernel/subsystems/linux/syscall_internal.h tests/host/test_linux_mm_policy.cpp tests/host/CMakeLists.txt wiki/security/WX-Enforcement.md wiki/reference/Design-Decisions.md`
