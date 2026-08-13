@@ -10,13 +10,11 @@
  * WHAT IS AND IS NOT REAL HERE — read before extending.
  *
  * A Windows dialog has two halves. The first is a resource-driven
- * one: DialogBoxParam / CreateDialogParam take a template out of the
- * PE's `.rsrc` section, instantiate every control the template
- * describes, and run a modal loop against them. DuetOS has NO PE
- * resource parser — nothing in kernel/loader or userland/libs walks
- * IMAGE_DIRECTORY_ENTRY_RESOURCE — so that half cannot be
- * implemented honestly and every entry point belonging to it carries
- * a STUB marker and returns the documented failure.
+ * one: DialogBoxParam / CreateDialogParam take a normal template out
+ * of the PE's `.rsrc` section, instantiate every control the template
+ * describes, and run a modal loop against them. `pe_resources.h`
+ * walks IMAGE_DIRECTORY_ENTRY_RESOURCE for both MAKEINTRESOURCE IDs
+ * and bounded A/W names; malformed or DIALOGEX templates fail closed.
  *
  * The second half is the item accessors: GetDlgItem, SetDlgItemText,
  * SendDlgItemMessage, CheckDlgButton and friends. Those are defined
@@ -30,8 +28,8 @@
  * resource compiler does — gets a REAL item surface.
  *
  * The dividing line, stated once so a future reader does not have to
- * re-derive it: anything that needs a TEMPLATE is stubbed; anything
- * that needs only a CONTROL ID is real.
+ * re-derive it: bounded resource templates and control-ID operations
+ * are real; an unbounded direct caller template is not parsed here.
  */
 
 #include "user32_32_internal.h"
@@ -199,9 +197,9 @@ __declspec(dllexport) UINT __stdcall GetDlgItemInt(HWND dlg, int id, BOOL* trans
  * Dialog templates — blocked on an RT_DIALOG template decoder
  * ------------------------------------------------------------------ */
 
-/* Resource-template implementation intentionally accepts only resource IDs.
- * The indirect APIs have no byte length, so treating a caller pointer as a
- * bounded template would not meet the malformed-input contract. */
+/* Indirect APIs have no byte length, so treating a caller pointer as a
+ * bounded template would not meet the malformed-input contract. Resource
+ * IDs and bounded named RT_DIALOG entries use the PE resource walker. */
 #include "../common/pe_resources.h"
 LRESULT __stdcall DefWindowProcA(HWND, UINT, WPARAM, LPARAM);
 HWND __stdcall CreateWindowExA(DWORD, const char*, const char*, DWORD, int, int, int, int, HWND, HMENU, HINSTANCE,
@@ -212,6 +210,7 @@ INT __stdcall GetMessageA(struct user32_msg32*, HWND, UINT, UINT);
 LRESULT __stdcall DispatchMessageA(const struct user32_msg32*);
 typedef INT(__stdcall* DLGPROC32)(HWND, UINT, WPARAM, LPARAM);
 #define DLG32_MAX_ITEMS 64u
+#define DLG32_RES_NAME_MAX 255u
 #define DLG32_WS_CHILD 0x40000000u
 #define DLG32_WS_VISIBLE 0x10000000u
 #define DLG32_WS_POPUP 0x80000000u
@@ -225,6 +224,46 @@ typedef struct
     unsigned size, off;
     int ok;
 } DLG32_CURSOR;
+
+static int dlg32_res_is_int(const void* p)
+{
+    return ((unsigned long)p >> 16) == 0ul;
+}
+
+static DUET_RES_KEY dlg32_res_key_from_wide(const wchar_t16* p)
+{
+    unsigned int len = 0;
+    if (!p || dlg32_res_is_int(p))
+        return duet_res_key_id((unsigned int)(unsigned long)p);
+    while (len < DLG32_RES_NAME_MAX && p[len] != 0)
+        ++len;
+    if (p[len] != 0)
+        return duet_res_key_name((const unsigned short*)0, 0u);
+    return duet_res_key_name((const unsigned short*)p, len);
+}
+
+static DUET_RES_KEY dlg32_res_key_from_ansi(const char* p, wchar_t16* wide, unsigned int cap)
+{
+    unsigned int len = 0;
+    if (!p || dlg32_res_is_int(p))
+        return duet_res_key_id((unsigned int)(unsigned long)p);
+    if (!wide || cap < 2u)
+        return duet_res_key_name((const unsigned short*)0, 0u);
+    while (len + 1u < cap && p[len] != 0)
+    {
+        wide[len] = (wchar_t16)(unsigned char)p[len];
+        ++len;
+    }
+    if (p[len] != 0)
+        return duet_res_key_name((const unsigned short*)0, 0u);
+    wide[len] = 0;
+    return duet_res_key_name((const unsigned short*)wide, len);
+}
+
+static int dlg32_res_key_usable(const DUET_RES_KEY* key)
+{
+    return key && (key->by_name ? key->name_len != 0u : key->id != 0u && key->id <= 0xFFFFu);
+}
 typedef struct
 {
     HWND hwnd;
@@ -544,22 +583,15 @@ static HWND dlg32_create(const void* raw, unsigned size, HWND parent, DLGPROC32 
     (void)DestroyWindow(hwnd);
     return hwnd;
 }
-static const void* dlg32_resource(HINSTANCE inst, unsigned id, unsigned* size)
+static const void* dlg32_resource(HINSTANCE inst, const DUET_RES_KEY* name, unsigned* size)
 {
     DUET_RES_VIEW v;
-    DUET_RES_KEY t, n;
+    DUET_RES_KEY t;
     unsigned rva;
-    if (!inst || !duet_res_init(inst, &v))
+    if (!inst || !dlg32_res_key_usable(name) || !duet_res_init(inst, &v))
         return 0;
-    t.by_name = 0;
-    t.id = DUET_RES_TYPE_DIALOG;
-    t.name = 0;
-    t.name_len = 0;
-    n.by_name = 0;
-    n.id = id;
-    n.name = 0;
-    n.name_len = 0;
-    if (!duet_res_find(&v, &t, &n, 0, 0, &rva, size))
+    t = duet_res_key_id(DUET_RES_TYPE_DIALOG);
+    if (!duet_res_find(&v, &t, name, 0, 0, &rva, size))
         return 0;
     return duet_res_at(&v, rva, *size);
 }
@@ -568,29 +600,36 @@ __declspec(dllexport) INT __stdcall DialogBoxParamA(HINSTANCE i, const char* t, 
     const void* r;
     unsigned s;
     INT o = -1;
-    unsigned long id = (unsigned long)t;
-    if (!id || id > 0xffffu)
-        return -1;
-    r = dlg32_resource(i, (unsigned)id, &s);
+    wchar_t16 wide[DLG32_RES_NAME_MAX + 1u];
+    const DUET_RES_KEY key = dlg32_res_key_from_ansi(t, wide, DLG32_RES_NAME_MAX + 1u);
+    r = dlg32_resource(i, &key, &s);
     return r && dlg32_create(r, s, p, (DLGPROC32)f, a, 1, &o) ? o : -1;
 }
 __declspec(dllexport) INT __stdcall DialogBoxParamW(HINSTANCE i, const wchar_t16* t, HWND p, void* f, LPARAM a)
 {
-    return DialogBoxParamA(i, (const char*)t, p, f, a);
+    const void* r;
+    unsigned s;
+    INT o = -1;
+    const DUET_RES_KEY key = dlg32_res_key_from_wide(t);
+    r = dlg32_resource(i, &key, &s);
+    return r && dlg32_create(r, s, p, (DLGPROC32)f, a, 1, &o) ? o : -1;
 }
 __declspec(dllexport) HWND __stdcall CreateDialogParamA(HINSTANCE i, const char* t, HWND p, void* f, LPARAM a)
 {
     const void* r;
     unsigned s;
-    unsigned long id = (unsigned long)t;
-    if (!id || id > 0xffffu)
-        return 0;
-    r = dlg32_resource(i, (unsigned)id, &s);
+    wchar_t16 wide[DLG32_RES_NAME_MAX + 1u];
+    const DUET_RES_KEY key = dlg32_res_key_from_ansi(t, wide, DLG32_RES_NAME_MAX + 1u);
+    r = dlg32_resource(i, &key, &s);
     return r ? dlg32_create(r, s, p, (DLGPROC32)f, a, 0, 0) : 0;
 }
 __declspec(dllexport) HWND __stdcall CreateDialogParamW(HINSTANCE i, const wchar_t16* t, HWND p, void* f, LPARAM a)
 {
-    return CreateDialogParamA(i, (const char*)t, p, f, a);
+    const void* r;
+    unsigned s;
+    const DUET_RES_KEY key = dlg32_res_key_from_wide(t);
+    r = dlg32_resource(i, &key, &s);
+    return r ? dlg32_create(r, s, p, (DLGPROC32)f, a, 0, 0) : 0;
 }
 __declspec(dllexport) BOOL __stdcall EndDialog(HWND h, INT r)
 {

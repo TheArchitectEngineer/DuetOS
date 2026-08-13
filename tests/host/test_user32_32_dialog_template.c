@@ -48,6 +48,11 @@ static int expect(int condition, const char* name)
 int main(void)
 {
     unsigned short count = 99;
+    wchar_t16 name_buf[DLG32_RES_NAME_MAX + 1u];
+    static const wchar_t16 named_wide[] = {'S', 'e', 't', 't', 'i', 'n', 'g', 's', 0};
+    char too_long[DLG32_RES_NAME_MAX + 2u];
+    DUET_RES_KEY key;
+    unsigned int n;
     /* style, exstyle, cdit=0, x/y/cx/cy, empty menu/class/title. */
     static const unsigned char normal_empty[] = {
         0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
@@ -71,5 +76,21 @@ int main(void)
     failed |= expect(!dlg32_validate(normal_empty, sizeof(normal_empty) - 1, &count), "truncated template");
     failed |= expect(!dlg32_validate(dialogex, sizeof(dialogex), &count), "DIALOGEX discriminator");
     failed |= expect(!dlg32_validate(unknown_ordinal, sizeof(unknown_ordinal), &count), "unknown class ordinal");
+
+    key = dlg32_res_key_from_ansi("Settings", name_buf, DLG32_RES_NAME_MAX + 1u);
+    failed |= expect(dlg32_res_key_usable(&key) && key.by_name && key.name_len == 8u && name_buf[0] == 'S',
+                     "ANSI named RT_DIALOG key");
+    key = dlg32_res_key_from_wide(named_wide);
+    failed |= expect(dlg32_res_key_usable(&key) && key.by_name && key.name_len == 8u && key.name == named_wide,
+                     "wide named RT_DIALOG key");
+    key = dlg32_res_key_from_ansi((const char*)(unsigned long)17u, name_buf, DLG32_RES_NAME_MAX + 1u);
+    failed |= expect(dlg32_res_key_usable(&key) && !key.by_name && key.id == 17u, "ordinal RT_DIALOG key");
+    key = dlg32_res_key_from_ansi("", name_buf, DLG32_RES_NAME_MAX + 1u);
+    failed |= expect(!dlg32_res_key_usable(&key), "empty named RT_DIALOG key rejected");
+    for (n = 0; n < DLG32_RES_NAME_MAX + 1u; ++n)
+        too_long[n] = 'x';
+    too_long[DLG32_RES_NAME_MAX + 1u] = 0;
+    key = dlg32_res_key_from_ansi(too_long, name_buf, DLG32_RES_NAME_MAX + 1u);
+    failed |= expect(!dlg32_res_key_usable(&key), "overlong named RT_DIALOG key rejected");
     return failed ? 1 : 0;
 }

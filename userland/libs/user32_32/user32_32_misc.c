@@ -587,24 +587,33 @@ static int user32_32_res_is_int(const void* p)
 
 static DUET_RES_KEY user32_32_res_key_from_wide(const wchar_t16* p)
 {
+    unsigned int len = 0;
     if (p == (const wchar_t16*)0 || user32_32_res_is_int((const void*)p))
         return duet_res_key_id((unsigned int)(unsigned long)(const void*)p);
-    return duet_res_key_name((const unsigned short*)p, duet_res_name_len((const unsigned short*)p));
+    while (len < USER32_32_RES_NAME_MAX && p[len] != 0)
+        ++len;
+    if (p[len] != 0)
+        return duet_res_key_name((const unsigned short*)0, 0u);
+    return duet_res_key_name((const unsigned short*)p, len);
 }
 
-/* `buf` must stay live for as long as the returned key is used. A name
- * longer than `cap - 1` is truncated, which cannot alias a longer
- * resource name because the length is part of the comparison. */
+/* `buf` must stay live for as long as the returned key is used. Names that
+ * do not terminate within the caller-independent cap fail closed instead of
+ * being truncated into a different resource name. */
 static DUET_RES_KEY user32_32_res_key_from_ansi(const char* s, wchar_t16* buf, unsigned int cap)
 {
     unsigned int i = 0;
     if (s == (const char*)0 || user32_32_res_is_int((const void*)s))
         return duet_res_key_id((unsigned int)(unsigned long)(const void*)s);
+    if (!buf || cap < 2u)
+        return duet_res_key_name((const unsigned short*)0, 0u);
     while (s[i] != 0 && i + 1u < cap)
     {
         buf[i] = (wchar_t16)(unsigned char)s[i];
         ++i;
     }
+    if (s[i] != 0)
+        return duet_res_key_name((const unsigned short*)0, 0u);
     buf[i] = 0;
     return duet_res_key_name((const unsigned short*)buf, i);
 }
@@ -830,28 +839,20 @@ static struct user32_accel_table* user32_accel_from_handle(HANDLE accel)
     return (struct user32_accel_table*)0;
 }
 
-static HANDLE user32_load_accelerators(HINSTANCE inst, unsigned int name_id)
+static HANDLE user32_load_accelerators(HINSTANCE inst, const DUET_RES_KEY* name)
 {
     DUET_RES_VIEW view;
     DUET_RES_KEY type;
-    DUET_RES_KEY name;
     unsigned int rva;
     unsigned int size;
     unsigned int count;
     unsigned int i;
     const unsigned char* data;
 
-    if (!user32_string_view(inst, &view))
+    if (!user32_32_res_key_usable(name) || !user32_string_view(inst, &view))
         return (HANDLE)0;
-    type.by_name = 0;
-    type.id = DUET_RES_TYPE_ACCELERATOR;
-    type.name = (const unsigned short*)0;
-    type.name_len = 0;
-    name.by_name = 0;
-    name.id = name_id;
-    name.name = (const unsigned short*)0;
-    name.name_len = 0;
-    if (!duet_res_find(&view, &type, &name, 0u, 0, &rva, &size) || size == 0u || (size % USER32_ACCEL_ENTRY_SIZE) != 0u)
+    type = duet_res_key_id(DUET_RES_TYPE_ACCELERATOR);
+    if (!duet_res_find(&view, &type, name, 0u, 0, &rva, &size) || size == 0u || (size % USER32_ACCEL_ENTRY_SIZE) != 0u)
         return (HANDLE)0;
     count = size / USER32_ACCEL_ENTRY_SIZE;
     if (count > USER32_ACCEL_ENTRIES)
@@ -882,14 +883,15 @@ static HANDLE user32_load_accelerators(HINSTANCE inst, unsigned int name_id)
 
 __declspec(dllexport) HANDLE __stdcall LoadAcceleratorsA(HINSTANCE inst, const char* name)
 {
-    const unsigned long id = (unsigned long)(unsigned long)name;
-    return id < 0x10000ul ? user32_load_accelerators(inst, (unsigned int)id) : (HANDLE)0;
+    wchar_t16 wide[USER32_32_RES_NAME_MAX + 1u];
+    const DUET_RES_KEY key = user32_32_res_key_from_ansi(name, wide, USER32_32_RES_NAME_MAX + 1u);
+    return user32_load_accelerators(inst, &key);
 }
 
 __declspec(dllexport) HANDLE __stdcall LoadAcceleratorsW(HINSTANCE inst, const wchar_t16* name)
 {
-    const unsigned long id = (unsigned long)(unsigned long)name;
-    return id < 0x10000ul ? user32_load_accelerators(inst, (unsigned int)id) : (HANDLE)0;
+    const DUET_RES_KEY key = user32_32_res_key_from_wide(name);
+    return user32_load_accelerators(inst, &key);
 }
 
 __declspec(dllexport) BOOL __stdcall DestroyAcceleratorTable(HANDLE accel)

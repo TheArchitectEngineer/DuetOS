@@ -1675,11 +1675,13 @@ WinDbg client API, `SymLoadModuleEx`.
   DS_SETFONT is accepted but font data is skipped; tab navigation
   in IsDialogMessage handles VK_TAB only (no mnemonics).
 - Dialog manager (resource-based): `DialogBoxParamA/W`,
-  `DialogBoxA/W`, `CreateDialogParamA/W`, `CreateDialogA/W` — STUB
-  when passed a PE resource ID (MAKEINTRESOURCE). Requires an
-  RT_DIALOG `.rsrc` walker that does not exist. If passed a direct
-  pointer to an in-memory template (address > 0xFFFF), delegates to
-  the Indirect variant and works.
+  `DialogBoxA/W`, `CreateDialogParamA/W`, `CreateDialogA/W` — REAL
+  for numbered and named `RT_DIALOG` resources. The PE walker resolves
+  either a MAKEINTRESOURCE ordinal or an A/W resource name before the
+  same bounds-validated normal-DLGTEMPLATE path creates the dialog.
+  GAP: DIALOGEX resources are deliberately rejected rather than
+  mis-decoded, and the Indirect APIs remain the supported path for
+  in-memory templates because a bare caller pointer carries no bound.
 - Hooks: `SetWindowsHookExA/W`, `UnhookWindowsHookEx`,
   `CallNextHookEx` — STUB
 - Subclassing: `SetWindowSubclass` lives in comctl32 — STUB
@@ -1728,12 +1730,13 @@ WinDbg client API, `SymLoadModuleEx`.
   `kernel/subsystems/win32/keycode_vk.h`). `LoadAcceleratorsA/W`
   parse `RT_ACCELERATOR` from the PE's `.rsrc` section via
   `duet_res_find`; `TranslateAcceleratorA/W` match VK + modifier
-  state and post `WM_COMMAND`. GAP: a fixed pool of 4 accelerator
-  tables per process, never reclaimed.
+  state and post `WM_COMMAND`. Tables are copied into a fixed pool of
+  four process-owned slots and reclaimed by `DestroyAcceleratorTable`.
 - **Named (string) resources — REAL on both bitnesses.**
-  `LoadBitmapA/W`, `LoadIconA/W`, `LoadCursorA/W`, `LoadImageA/W`
-  and `LoadAcceleratorsA/W` accept a `.rc` resource declared by
-  name, not just a `MAKEINTRESOURCE` ordinal. A pointer at or below
+  `LoadBitmapA/W`, `LoadIconA/W`, `LoadCursorA/W`, `LoadImageA/W`,
+  `LoadAcceleratorsA/W`, and resource-based dialog creation accept a
+  `.rc` resource declared by name, not just a `MAKEINTRESOURCE`
+  ordinal. A pointer at or below
   `0xFFFF` is an ordinal; anything above is a string, which the `A`
   entry points widen before lookup. The comparison is the ASCII
   case-insensitive fold the resource compiler applies, and the two
@@ -1743,10 +1746,9 @@ WinDbg client API, `SymLoadModuleEx`.
   running past the resource section, a string offset past the
   directory extent, and a name inside the host buffer but outside
   the mapped section extent are all rejected. Host-tested by
-  `tests/host/test_pe_named_resources.cpp`. GAP: an `A`-entry name
-  longer than 255 characters is truncated at the widening step, so
-  it simply finds nothing — length is part of the comparison, so a
-  truncated name cannot alias a longer one. GAP: the `A`-to-`W`
+  `tests/host/test_pe_named_resources.cpp`. Names longer than 255
+  characters are rejected before lookup, so a bounded caller string
+  cannot alias a longer resource name. GAP: the `A`-to-`W`
   widening is byte-to-code-point, so names outside Latin-1 in the
   caller's code page will not match.
 
