@@ -516,6 +516,8 @@ static HWND dlg32_create(const void* raw, unsigned size, HWND parent, DLGPROC32 
         unsigned is, ie;
         unsigned short id, ord = 0, extra, first;
         char cls[64], text[WIN_TITLE_MAX];
+
+        cls[0] = '\0';
         dlg32_align(&c);
         is = dlg32_u32(&c);
         ie = dlg32_u32(&c);
